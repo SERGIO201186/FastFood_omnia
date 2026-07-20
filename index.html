@@ -835,13 +835,13 @@ function renderChat(){
     if(m.kind==='text') return `<div class="msg-row ${m.role}"><div class="bubble-text">${esc(m.text)}</div></div>`;
     if(m.kind==='buttons') return `<div class="msg-row assistant"><div class="bubble-wrap">
         <div class="bubble-lead">${esc(m.text)}</div>
-        <div class="opt-list">${m.opciones.map(op=>`<button ${chatHandoff||chatTyping?'disabled':''} onclick="enviarMensajeChat(${JSON.stringify(op)})">${esc(op)}</button>`).join('')}</div>
+        <div class="opt-list">${m.opciones.map(op=>`<button ${chatHandoff||chatTyping?'disabled':''} onclick="enviarMensajeChat(${esc(JSON.stringify(op))})">${esc(op)}</button>`).join('')}</div>
       </div></div>`;
     if(m.kind==='list') return `<div class="msg-row assistant"><div class="list-card">
         <div class="msg">${esc(m.text)}</div>
         <div class="items">${m.opciones.map(op=>{
           const p = buscarPlatilloPorTitulo(op.titulo);
-          return `<button ${chatHandoff||chatTyping?'disabled':''} onclick="enviarMensajeChat(${JSON.stringify(op.titulo)})">
+          return `<button ${chatHandoff||chatTyping?'disabled':''} onclick="enviarMensajeChat(${esc(JSON.stringify(op.titulo))})">
             ${p?`<div class="item-ico" style="background:linear-gradient(135deg, ${p.color||'#C7703C'}, #1F1B16)">${p.imagen?`<img src="${p.imagen}">`:esc(p.emoji||'🍽️')}</div>`:''}
             <div><div style="font-size:13px;color:var(--text);font-weight:500">${esc(op.titulo)}</div>${op.descripcion?`<div style="font-size:11px;color:var(--text2)">${esc(op.descripcion)}</div>`:''}</div>
           </button>`;
@@ -854,12 +854,12 @@ function renderChat(){
   wrap.scrollTop = wrap.scrollHeight;
 
   document.getElementById('chatSuggestions').innerHTML = (chatMessages.length<=1 && !chatTyping) ?
-    ['Quiero reservar una mesa','Quiero pedir a domicilio','Quiero pedir para recoger','¿Cómo llego?'].map(s=>`<button onclick="enviarMensajeChat(${JSON.stringify(s)})">${esc(s)}</button>`).join('') : '';
+    ['Quiero reservar una mesa','Quiero pedir a domicilio','Quiero pedir para recoger','¿Cómo llego?'].map(s=>`<button onclick="enviarMensajeChat(${esc(JSON.stringify(s))})">${esc(s)}</button>`).join('') : '';
 
   const cartBar = document.getElementById('cartBar');
   if(chatCarrito.length>0 && !chatHandoff){
     cartBar.innerHTML = `
-      ${chatCarritoAbierto ? `<div class="cart-items">${chatCarrito.map(it=>`<div class="row"><span>${it.cantidad} × ${esc(it.platillo)}</span><span style="display:flex;align-items:center;gap:8px"><span style="color:var(--text2)">${mxn(it.subtotal)}</span><button onclick="quitarDelCarritoChat(${JSON.stringify(it.platillo)})" style="color:var(--text4)">✕</button></span></div>`).join('')}</div>`:''}
+      ${chatCarritoAbierto ? `<div class="cart-items">${chatCarrito.map(it=>`<div class="row"><span>${it.cantidad} × ${esc(it.platillo)}</span><span style="display:flex;align-items:center;gap:8px"><span style="color:var(--text2)">${mxn(it.subtotal)}</span><button onclick="quitarDelCarritoChat(${esc(JSON.stringify(it.platillo))})" style="color:var(--text4)">✕</button></span></div>`).join('')}</div>`:''}
       <div class="cart-actions">
         <button class="cart-toggle" style="${chatCarritoAbierto?'border-radius:0 0 10px 10px;border-top:none':''}" onclick="chatCarritoAbierto=!chatCarritoAbierto;renderChat()">
           <span style="color:var(--accent);font-weight:600">🛒 ${chatCarrito.reduce((a,it)=>a+it.cantidad,0)} artículo(s)</span>
@@ -888,7 +888,7 @@ function renderSelectorCantidad(m){
         <span id="${rid}-n">1</span>
         <button ${chatHandoff||chatTyping?'disabled':''} onclick="cambiarQtyLocal('${rid}',1,${m.precioUnitario})">+</button>
       </div>
-      <button class="btn btn-accent" style="flex:1" ${chatHandoff||chatTyping?'disabled':''} onclick="confirmarCantidadChat(${JSON.stringify(m.platillo)},${m.precioUnitario},window['__qty_${rid}'])" id="${rid}-btn">Agregar · ${mxn(m.precioUnitario)}</button>
+      <button class="btn btn-accent" style="flex:1" ${chatHandoff||chatTyping?'disabled':''} onclick="confirmarCantidadChat(${esc(JSON.stringify(m.platillo))},${m.precioUnitario},window['__qty_${rid}'])" id="${rid}-btn">Agregar · ${mxn(m.precioUnitario)}</button>
     </div>
   </div>`;
 }
@@ -996,7 +996,7 @@ function renderMesero(){
     const categorias = [...new Set(db.menu.map(p=>p.categoria))];
     body.innerHTML = `<div class="cat-grid">${categorias.map(cat=>{
       const muestra = db.menu.find(p=>p.categoria===cat);
-      return `<button class="cat-btn" style="background:linear-gradient(135deg, ${muestra.color||'#C7703C'}, #1F1B16)" onclick="meseroCategoriaActiva=${JSON.stringify(cat)};meseroVista='platillos';renderMesero()">
+      return `<button class="cat-btn" style="background:linear-gradient(135deg, ${muestra.color||'#C7703C'}, #1F1B16)" onclick="meseroCategoriaActiva=${esc(JSON.stringify(cat))};meseroVista='platillos';renderMesero()">
         <span class="emoji">${esc(muestra.emoji||'🍽️')}</span><span class="n">${esc(cat)}</span></button>`;
     }).join('')}</div>`;
   } else if(meseroVista==='platillos'){
@@ -1013,7 +1013,7 @@ function renderMesero(){
         comandaActual.map(it=>`<div class="comanda-row">
           <div class="plat-ico" style="width:36px;height:36px;font-size:16px;background:${it.imagen?'none':`linear-gradient(135deg, ${it.color||'#C7703C'}, #1F1B16)`}">${it.imagen?`<img src="${it.imagen}">`:esc(it.emoji||'🍽️')}</div>
           <div style="flex:1"><div class="n">${it.cantidad} × ${esc(it.platillo)}</div><div class="p">${mxn(it.subtotal)}</div></div>
-          <button onclick="quitarDeComanda(${JSON.stringify(it.platillo)})" style="color:var(--text4)">🗑</button>
+          <button onclick="quitarDeComanda(${esc(JSON.stringify(it.platillo))})" style="color:var(--text4)">🗑</button>
         </div>`).join('')}
       <div style="display:flex;justify-content:space-between;margin:14px 4px"><span style="color:var(--text2)">Total</span><span style="font-size:17px;font-weight:600">${mxn(totalCarrito(comandaActual))}</span></div>
       <button class="btn btn-accent btn-lg" style="width:100%" ${comandaActual.length===0?'disabled':''} onclick="enviarACocina()">➤ Enviar a cocina</button>
@@ -1147,7 +1147,7 @@ function viewDuenoMenu(){
           <div class="price">${mxn(p.precio)}</div>
           <span class="tag-pill ${p.disponible?'tag-ok':'tag-no'}">${p.disponible?'Disponible':'Agotado'}</span>
           <div class="actions">
-            <button onclick='duenoModalPlatillo=${JSON.stringify(p)};renderDueno()'>✎ Editar</button>
+            <button onclick='duenoModalPlatillo=${esc(JSON.stringify(p))};renderDueno()'>✎ Editar</button>
             <button onclick="eliminarPlatilloDueno('${p.id}')">🗑 Eliminar</button>
           </div>
         </div>
