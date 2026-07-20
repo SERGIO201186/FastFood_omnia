@@ -371,6 +371,10 @@ function normalizarPedido(p){
 
 document.addEventListener('DOMContentLoaded', () => {
   loadCfg(); loadDbLocal();
+  // Esta pantalla nunca traía la clase "hidden" desde el HTML, así que se
+  // veía apenas cargaba la página sin que ninguna condición la controlara.
+  // La ocultamos aquí explícitamente y solo se muestra cuando de verdad hace falta.
+  document.getElementById('setupView').classList.add('hidden');
   iniciarApp();
 });
 
