@@ -319,6 +319,20 @@ function loadCfg(){
 function saveCfg(){ localStorage.setItem('ff_cfg', JSON.stringify(cfg)); }
 
 let db = { menu: [], pedidos: [], reservaciones: [], tickets: [] };
+let esDemoSinIA = false; // true cuando la licencia es demo: el chat responde con guion fijo, sin llamar a ninguna IA
+function sembrarMenuDemo(){
+  if(db.menu.length) return; // no pisar datos si ya hay algo guardado localmente
+  db.menu = [
+    { id:'demo1', platillo:'Burger Clásica', categoria:'Burgers', precio:95, disponible:true, emoji:'🍔' },
+    { id:'demo2', platillo:'Burger BBQ Bacon', categoria:'Burgers', precio:120, disponible:true, emoji:'🍔' },
+    { id:'demo3', platillo:'Papas Gajo', categoria:'Acompañamientos', precio:55, disponible:true, emoji:'🍟' },
+    { id:'demo4', platillo:'Aros de Cebolla', categoria:'Acompañamientos', precio:60, disponible:true, emoji:'🧅' },
+    { id:'demo5', platillo:'Alitas BBQ (10 pz)', categoria:'Alitas', precio:135, disponible:true, emoji:'🍗' },
+    { id:'demo6', platillo:'Malteada de Fresa', categoria:'Bebidas', precio:65, disponible:true, emoji:'🥤' },
+    { id:'demo7', platillo:'Refresco', categoria:'Bebidas', precio:30, disponible:true, emoji:'🥤' },
+  ];
+  saveDbLocal();
+}
 function loadDbLocal(){
   try{ const d = localStorage.getItem('ff_db'); if(d) db = {...db, ...JSON.parse(d)}; }catch(e){}
 }
@@ -418,7 +432,12 @@ async function verificarAccesoOmnia(){
       // En demo no se pide conectar el Sheet propio del restaurante: se prueba
       // la app entera con datos locales. Ese paso solo aplica a licencias Pro,
       // que sí necesitan guardar su menú/pedidos de verdad.
-      if(j.type === 'demo'){ await arrancarAppReal(); return; }
+      if(j.type === 'demo'){
+        esDemoSinIA = true;
+        sembrarMenuDemo();
+        await arrancarAppReal();
+        return;
+      }
       if(!cfg.url){ document.getElementById('setupView').classList.remove('hidden'); return; }
       await arrancarAppReal();
       return;
@@ -623,6 +642,7 @@ async function confirmarCantidadChat(platillo, precioUnitario, cantidad){
   else chatCarrito.push({ platillo, cantidad, precioUnitario, subtotal:cantidad*precioUnitario });
 
   chatMessages.push({ role:'assistant', kind:'confirmacion', text:`Agregado: ${cantidad} × ${platillo}`, subtotal:cantidad*precioUnitario, time:nowLabel() });
+  if(esDemoSinIA){ renderChat(); await continuarTrasCantidadSimulado(); return; }
   chatHistory.push({ role:'user', content: `[[TOOL_RESULT:mostrar_selector_cantidad]]${JSON.stringify({ agregado:{platillo,cantidad,precio_unitario:precioUnitario,subtotal:cantidad*precioUnitario}, carrito_actual: chatCarrito.map(it=>({platillo:it.platillo,cantidad:it.cantidad,subtotal:it.subtotal})), total_acumulado: totalCarrito(chatCarrito) })}[[/TOOL_RESULT]]` });
   renderChat();
   await procesarTurnoChat();
@@ -631,6 +651,131 @@ function quitarDelCarritoChat(platillo){
   chatCarrito = chatCarrito.filter(it=>it.platillo!==platillo);
   chatHistory.push({ role:'user', content: `[[TOOL_RESULT:mostrar_selector_cantidad]]${JSON.stringify({ eliminado:platillo, carrito_actual: chatCarrito.map(it=>({platillo:it.platillo,cantidad:it.cantidad,subtotal:it.subtotal})), total_acumulado: totalCarrito(chatCarrito) })}[[/TOOL_RESULT]]` });
   renderChat();
+}
+
+// =====================================================================
+// SIMULADOR DE CHAT SIN IA (solo modo demo) — reutiliza las mismas
+// herramientas locales (ejecutarHerramienta, carrito, etc.) que ya usa el
+// flujo real; lo único que cambia es que aquí las reglas deciden el
+// siguiente paso en vez de un modelo de lenguaje.
+// =====================================================================
+let demoEtapa = 'inicio';
+let demoTemp = {};
+
+function buscarCategoriaDemo(texto){
+  const norm = String(texto||'').toLowerCase();
+  const cats = [...new Set(db.menu.map(p=>p.categoria))];
+  return cats.find(c=> norm.includes(c.toLowerCase()) || c.toLowerCase().includes(norm));
+}
+
+async function procesarTurnoSimulado(mensajeUsuario){
+  chatTyping = true; renderChat();
+  await new Promise(res=>setTimeout(res, 350)); // pausa breve, se siente más natural que una respuesta instantánea
+  const txt = String(mensajeUsuario||'').toLowerCase().trim();
+
+  const volverAlMenu = (mensaje) => {
+    chatMessages.push({ role:'assistant', kind:'buttons', text: mensaje || '¿Algo más en qué ayudarte?', opciones:['Hacer un pedido','Reservar mesa','Info y horarios'], time:nowLabel() });
+    demoEtapa = 'inicio';
+  };
+  const noEntendi = () => volverAlMenu('No entendí bien 🙏 elige una opción:');
+
+  if(demoEtapa==='inicio'){
+    if(txt.includes('pedido') || txt.includes('domicilio') || txt.includes('recoger')){
+      const categorias = [...new Set(db.menu.map(p=>p.categoria))];
+      chatMessages.push({ role:'assistant', kind:'list', text:'Claro, ¿qué categoría te late?', opciones: categorias.map(c=>({titulo:c})), time:nowLabel() });
+      demoEtapa = 'categoria';
+    } else if(txt.includes('reserv') || txt.includes('mesa')){
+      chatMessages.push({ role:'assistant', kind:'text', text:'¡Con gusto! ¿Para qué fecha te gustaría reservar? (por ejemplo: 25 de julio)', time:nowLabel() });
+      demoEtapa = 'reserva_fecha'; demoTemp = {};
+    } else if(txt.includes('info') || txt.includes('horario') || txt.includes('ubicac') || txt.includes('llegar')){
+      chatMessages.push({ role:'assistant', kind:'text', text:`📍 ${cfg.ubicacion||'Ubicación de ejemplo'}\n🕐 ${cfg.horario_atencion}`, time:nowLabel() });
+      volverAlMenu();
+    } else {
+      noEntendi();
+    }
+  }
+  else if(demoEtapa==='categoria'){
+    const cat = buscarCategoriaDemo(mensajeUsuario);
+    if(cat){
+      const items = db.menu.filter(p=>p.categoria===cat);
+      chatMessages.push({ role:'assistant', kind:'list', text:`Esto tenemos en ${cat}:`, opciones: items.map(i=>({titulo:i.platillo, descripcion:`$${i.precio}`})), time:nowLabel() });
+      demoEtapa = 'platillo';
+    } else noEntendi();
+  }
+  else if(demoEtapa==='platillo'){
+    const p = buscarPlatilloPorTitulo(mensajeUsuario);
+    if(p){
+      chatMessages.push({ role:'assistant', kind:'cantidad', platillo:p.platillo, precioUnitario:p.precio, time:nowLabel() });
+      demoEtapa = 'post_cantidad';
+    } else noEntendi();
+  }
+  else if(demoEtapa==='post_agregar'){
+    if(txt.includes('otro') || txt.includes('agregar')){
+      const categorias = [...new Set(db.menu.map(p=>p.categoria))];
+      chatMessages.push({ role:'assistant', kind:'list', text:'¿Qué más te gustaría agregar?', opciones: categorias.map(c=>({titulo:c})), time:nowLabel() });
+      demoEtapa = 'categoria';
+    } else if(txt.includes('termin') || txt.includes('list')){
+      if(chatCarrito.length===0){ volverAlMenu('Tu carrito está vacío. ¿Quieres empezar un pedido?'); }
+      else {
+        const total = totalCarrito(chatCarrito);
+        chatMessages.push({ role:'assistant', kind:'text', text:`Tu pedido: ${chatCarrito.map(it=>`${it.cantidad}× ${it.platillo}`).join(', ')}. Total: $${total} MXN.`, time:nowLabel() });
+        chatMessages.push({ role:'assistant', kind:'buttons', text:'¿Te mando el link de pago (simulado)?', opciones:['Sí, envíamelo','No, gracias'], time:nowLabel() });
+        demoEtapa = 'confirmar_pago';
+      }
+    } else noEntendi();
+  }
+  else if(demoEtapa==='confirmar_pago'){
+    if(txt.includes('sí') || txt.includes('si')){
+      const resultado = ejecutarHerramienta('enviar_link_pago', { telefono:'Cliente demo', total_cuenta: totalCarrito(chatCarrito) });
+      chatMessages.push({ role:'assistant', kind:'text', text:`✅ Pedido registrado (folio ${resultado.id_pedido}, esto es una demo así que no hay cobro real). ¡Gracias por tu compra!`, time:nowLabel() });
+      volverAlMenu();
+    } else {
+      chatMessages.push({ role:'assistant', kind:'text', text:'Sin problema, tu pedido queda guardado por si quieres cerrarlo después.', time:nowLabel() });
+      demoEtapa = 'post_agregar';
+    }
+  }
+  else if(demoEtapa==='reserva_fecha'){
+    demoTemp.fecha = mensajeUsuario;
+    chatMessages.push({ role:'assistant', kind:'text', text:'Perfecto, ¿a qué hora? (por ejemplo: 8:00 PM)', time:nowLabel() });
+    demoEtapa = 'reserva_hora';
+  }
+  else if(demoEtapa==='reserva_hora'){
+    demoTemp.hora = mensajeUsuario;
+    chatMessages.push({ role:'assistant', kind:'text', text:'¿Para cuántas personas?', time:nowLabel() });
+    demoEtapa = 'reserva_personas';
+  }
+  else if(demoEtapa==='reserva_personas'){
+    demoTemp.personas = mensajeUsuario;
+    const resultado = ejecutarHerramienta('verificar_disponibilidad_mesas', { fecha:demoTemp.fecha, hora:demoTemp.hora, personas: Number(mensajeUsuario)||1 });
+    if(resultado.disponible){
+      chatMessages.push({ role:'assistant', kind:'text', text:'¡Hay lugar! ¿A nombre de quién hago la reservación?', time:nowLabel() });
+      demoEtapa = 'reserva_nombre';
+    } else {
+      chatMessages.push({ role:'assistant', kind:'text', text:'Justo en ese horario no tenemos lugar 😕 ¿quieres intentar con otra hora?', time:nowLabel() });
+      volverAlMenu();
+    }
+  }
+  else if(demoEtapa==='reserva_nombre'){
+    demoTemp.nombre_cliente = mensajeUsuario;
+    chatMessages.push({ role:'assistant', kind:'text', text:'¿Y un teléfono de contacto?', time:nowLabel() });
+    demoEtapa = 'reserva_telefono';
+  }
+  else if(demoEtapa==='reserva_telefono'){
+    const resultado = ejecutarHerramienta('crear_reservacion', { ...demoTemp, telefono:mensajeUsuario });
+    chatMessages.push({ role:'assistant', kind:'text', text:`✅ ¡Reservación confirmada! (folio ${resultado.id}) Te esperamos.`, time:nowLabel() });
+    volverAlMenu();
+  }
+  else { noEntendi(); }
+
+  chatTyping = false; renderChat();
+}
+
+async function continuarTrasCantidadSimulado(){
+  chatTyping = true; renderChat();
+  await new Promise(res=>setTimeout(res, 300));
+  chatMessages.push({ role:'assistant', kind:'buttons', text:'¿Agregas algo más?', opciones:['Agregar otro platillo','Ya terminé mi pedido'], time:nowLabel() });
+  demoEtapa = 'post_agregar';
+  chatTyping = false; renderChat();
 }
 
 async function procesarTurnoChat(){
@@ -678,6 +823,7 @@ async function enviarMensajeChat(textoOverride){
   if(!contenido || chatTyping || chatHandoff) return;
   chatMessages.push({ role:'user', kind:'text', text:contenido, time:nowLabel() });
   inp.value='';
+  if(esDemoSinIA){ renderChat(); await procesarTurnoSimulado(contenido); return; }
   chatHistory.push({ role:'user', content: contenido });
   renderChat();
   await procesarTurnoChat();
