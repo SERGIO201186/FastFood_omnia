@@ -230,10 +230,9 @@ table.simple{border:1px solid var(--border);border-radius:10px;overflow:hidden;}
     <h2 id="gateTitulo">Verificando acceso…</h2>
     <p id="gateMsg">Un momento por favor.</p>
     <div id="gateFormWrap" class="hidden">
-      <div class="field" style="text-align:left"><input id="gateNombre" placeholder="Nombre de tu restaurante"></div>
-      <div class="field" style="text-align:left"><input id="gateTel" placeholder="Teléfono / WhatsApp"></div>
-      <div class="field" style="text-align:left"><input id="gateEmail" type="email" placeholder="Correo electrónico"></div>
-      <button class="btn btn-accent btn-lg" style="width:100%" onclick="enviarContactoGate()">Solicitar acceso</button>
+      <div class="field" style="text-align:left"><input id="gateKey" placeholder="XXXX-XXXX-XXXX-XXXX" style="text-transform:uppercase"></div>
+      <button class="btn btn-accent btn-lg" style="width:100%" onclick="verificarClaveGate()">Activar</button>
+      <p id="gateKeyAviso" style="color:var(--danger);font-size:12px;margin-top:8px;display:none"></p>
     </div>
     <button class="btn btn-ghost btn-sm" style="margin-top:12px" onclick="verificarAccesoOmnia()">↺ Reintentar</button>
   </div>
@@ -296,7 +295,7 @@ table.simple{border:1px solid var(--border);border-radius:10px;overflow:hidden;}
 
 <script>
 const OMNIA_CONTROL_URL = 'https://script.google.com/macros/s/AKfycbzhU4ElNfiCO808AgiXcIxj3cazaAdrtiXdpGJ_f-FnCb3LqsrseZbBSCJ7-WaMrxdWcA/exec';
-const PRODUCT_ID = 'fastfood_omnia';
+const PRODUCT_ID = 'prod_fastfood'; // debe coincidir con el id en la pestaña Products del maestro
 const APP_NAME = 'fastfood_omnia';
 
 function uid(p){ return p+'_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6); }
@@ -385,6 +384,9 @@ function guardarSetupUrl(){
   iniciarApp();
 }
 
+function getLicenseKey(){ return localStorage.getItem('ff_license_key') || ''; }
+function setLicenseKey(k){ localStorage.setItem('ff_license_key', k); }
+
 async function iniciarApp(){
   document.getElementById('gateView').classList.remove('hidden');
   await verificarAccesoOmnia();
@@ -395,44 +397,53 @@ async function verificarAccesoOmnia(){
         msg = document.getElementById('gateMsg'), formWrap = document.getElementById('gateFormWrap');
   ico.textContent='⏳'; tit.textContent='Verificando acceso…'; msg.textContent='Un momento por favor.'; formWrap.classList.add('hidden');
 
+  const key = getLicenseKey();
+  if(!key){
+    ico.textContent='🔑'; tit.textContent='Activa tu acceso';
+    msg.textContent='Pega la clave que recibiste por correo al solicitar tu demo.';
+    formWrap.classList.remove('hidden');
+    return;
+  }
+
   try{
-    const params = new URLSearchParams({ action:'check', app:APP_NAME, device_id:deviceId(), nombre_negocio: cfg.nombre_restaurante||'' , version:'1.0'});
-    const r = await fetch(`${OMNIA_CONTROL_URL}?${params.toString()}`);
+    const params = new URLSearchParams({ action:'verify', key, productId:PRODUCT_ID, t: Date.now() });
+    const r = await fetch(`${OMNIA_CONTROL_URL}?${params.toString()}`, {cache:'no-store'});
     const j = await r.json();
 
-    if(j.estado === 'activo'){
+    if(j.status === 'active'){
       document.getElementById('gateView').classList.add('hidden');
       await arrancarAppReal();
       return;
     }
-    if(j.estado === 'bloqueado'){
-      ico.textContent='🚫'; tit.textContent='Acceso bloqueado'; msg.textContent = j.mensaje || 'Contacta a Omnia Technology para reactivar tu acceso.';
+    if(j.status === 'locked'){
+      ico.textContent='🚫'; tit.textContent='Acceso bloqueado'; msg.textContent = 'Contacta a Omnia Technology para reactivar tu acceso.';
       return;
     }
-    if(j.estado === 'vencido'){
-      ico.textContent='⏰'; tit.textContent='Tu acceso venció'; msg.textContent = j.mensaje || 'Contacta a Omnia Technology para renovar.';
+    if(j.status === 'expired'){
+      ico.textContent='⏰'; tit.textContent='Tu demo venció'; msg.textContent = 'Contacta a Omnia Technology para activar tu licencia Pro.';
       return;
     }
-    ico.textContent='📝'; tit.textContent='Solicita tu acceso';
-    msg.textContent='Deja tus datos y te activamos el acceso.';
-    if(!j.tieneContacto) formWrap.classList.remove('hidden');
-    else msg.textContent='Ya recibimos tus datos, estamos activando tu acceso.';
+    // not_found u otro: la clave guardada ya no es válida, pide una nueva
+    setLicenseKey('');
+    ico.textContent='🔑'; tit.textContent='Clave inválida';
+    msg.textContent='Esa clave ya no es válida. Pide una nueva demo o pega tu clave otra vez.';
+    formWrap.classList.remove('hidden');
   }catch(e){
     ico.textContent='📡'; tit.textContent='Sin conexión'; msg.textContent='No se pudo verificar el acceso. Revisa tu internet e intenta de nuevo.';
   }
 }
 
-async function enviarContactoGate(){
-  const nombre_negocio = document.getElementById('gateNombre').value.trim();
-  const telefono = document.getElementById('gateTel').value.trim();
-  const email = document.getElementById('gateEmail').value.trim();
-  if(!nombre_negocio || !telefono){ return; }
-  await fetch(OMNIA_CONTROL_URL, {
-    method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'},
-    body: JSON.stringify({ action:'actualizar_contacto', app:APP_NAME, device_id:deviceId(), nombre_negocio, telefono, email }),
-  }).catch(()=>{});
-  document.getElementById('gateMsg').textContent = 'Gracias, recibimos tus datos. Te avisamos en cuanto se active tu acceso.';
-  document.getElementById('gateFormWrap').classList.add('hidden');
+async function verificarClaveGate(){
+  const val = document.getElementById('gateKey').value.trim().toUpperCase();
+  const aviso = document.getElementById('gateKeyAviso');
+  if(!val){ return; }
+  setLicenseKey(val);
+  aviso.style.display='none';
+  await verificarAccesoOmnia();
+  if(!document.getElementById('appView').classList.contains('show')){
+    aviso.style.display='block';
+    aviso.textContent='No pudimos activar esa clave. Verifica que esté copiada completa.';
+  }
 }
 
 async function arrancarAppReal(){
