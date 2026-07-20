@@ -411,6 +411,10 @@ async function verificarAccesoOmnia(){
 
     if(j.status === 'active'){
       document.getElementById('gateView').classList.add('hidden');
+      // En demo no se pide conectar el Sheet propio del restaurante: se prueba
+      // la app entera con datos locales. Ese paso solo aplica a licencias Pro,
+      // que sí necesitan guardar su menú/pedidos de verdad.
+      if(j.type === 'demo'){ await arrancarAppReal(); return; }
       if(!cfg.url){ document.getElementById('setupView').classList.remove('hidden'); return; }
       await arrancarAppReal();
       return;
