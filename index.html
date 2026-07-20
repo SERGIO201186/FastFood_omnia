@@ -728,9 +728,9 @@ async function procesarTurnoSimulado(mensajeUsuario){
 
   if(demoEtapa==='inicio'){
     if(txt.includes('pedido') || txt.includes('domicilio') || txt.includes('recoger')){
-      const categorias = [...new Set(db.menu.map(p=>p.categoria))];
-      chatMessages.push({ role:'assistant', kind:'list', text:'Claro, ¿qué categoría te late?', opciones: categorias.map(c=>({titulo:c})), time:nowLabel() });
-      demoEtapa = 'categoria';
+      chatMessages.push({ role:'assistant', kind:'buttons', text:'¿Lo recoges en el local o te lo llevamos a domicilio?', opciones:['Recoger en el local','Envío a domicilio'], time:nowLabel() });
+      demoTemp = {};
+      demoEtapa = 'tipo_entrega';
     } else if(txt.includes('reserv') || txt.includes('mesa')){
       chatMessages.push({ role:'assistant', kind:'text', text:'¡Con gusto! ¿Para qué fecha te gustaría reservar? (por ejemplo: 25 de julio)', time:nowLabel() });
       demoEtapa = 'reserva_fecha'; demoTemp = {};
@@ -740,6 +740,25 @@ async function procesarTurnoSimulado(mensajeUsuario){
     } else {
       noEntendi();
     }
+  }
+  else if(demoEtapa==='tipo_entrega'){
+    if(txt.includes('domicilio') || txt.includes('envío') || txt.includes('envio')){
+      demoTemp.tipoEntrega = 'domicilio';
+      chatMessages.push({ role:'assistant', kind:'text', text:'Perfecto, ¿cuál es tu dirección completa de entrega?', time:nowLabel() });
+      demoEtapa = 'direccion_entrega';
+    } else if(txt.includes('recoger') || txt.includes('local')){
+      demoTemp.tipoEntrega = 'recoger';
+      const categorias = [...new Set(db.menu.map(p=>p.categoria))];
+      chatMessages.push({ role:'assistant', kind:'list', text:'Claro, ¿qué categoría te late?', opciones: categorias.map(c=>({titulo:c})), time:nowLabel() });
+      demoEtapa = 'categoria';
+    } else noEntendi();
+  }
+  else if(demoEtapa==='direccion_entrega'){
+    demoTemp.direccion = mensajeUsuario;
+    const categorias = [...new Set(db.menu.map(p=>p.categoria))];
+    chatMessages.push({ role:'assistant', kind:'text', text:`Anotado: ${mensajeUsuario}. El envío tiene un costo de $${cfg.costo_envio} MXN.`, time:nowLabel() });
+    chatMessages.push({ role:'assistant', kind:'list', text:'Ahora sí, ¿qué categoría te late?', opciones: categorias.map(c=>({titulo:c})), time:nowLabel() });
+    demoEtapa = 'categoria';
   }
   else if(demoEtapa==='categoria'){
     const cat = buscarCategoriaDemo(mensajeUsuario);
@@ -764,8 +783,13 @@ async function procesarTurnoSimulado(mensajeUsuario){
     } else if(txt.includes('termin') || txt.includes('list')){
       if(chatCarrito.length===0){ volverAlMenu('Tu carrito está vacío. ¿Quieres empezar un pedido?'); }
       else {
-        const total = totalCarrito(chatCarrito);
-        chatMessages.push({ role:'assistant', kind:'text', text:`Tu pedido: ${chatCarrito.map(it=>`${it.cantidad}× ${it.platillo}`).join(', ')}. Total: $${total} MXN.`, time:nowLabel() });
+        const esDomicilio = demoTemp.tipoEntrega === 'domicilio';
+        const envio = esDomicilio ? (Number(cfg.costo_envio)||0) : 0;
+        const total = totalCarrito(chatCarrito) + envio;
+        const resumen = `Tu pedido: ${chatCarrito.map(it=>`${it.cantidad}× ${it.platillo}`).join(', ')}.` +
+          (esDomicilio ? ` Envío a: ${demoTemp.direccion} (+$${envio} MXN de envío).` : ' Para recoger en el local.') +
+          ` Total: $${total} MXN.`;
+        chatMessages.push({ role:'assistant', kind:'text', text:resumen, time:nowLabel() });
         chatMessages.push({ role:'assistant', kind:'buttons', text:'¿Te mando el link de pago (simulado)?', opciones:['Sí, envíamelo','No, gracias'], time:nowLabel() });
         demoEtapa = 'confirmar_pago';
       }
@@ -773,7 +797,8 @@ async function procesarTurnoSimulado(mensajeUsuario){
   }
   else if(demoEtapa==='confirmar_pago'){
     if(txt.includes('sí') || txt.includes('si')){
-      const resultado = ejecutarHerramienta('enviar_link_pago', { telefono:'Cliente demo', total_cuenta: totalCarrito(chatCarrito) });
+      const envio = demoTemp.tipoEntrega==='domicilio' ? (Number(cfg.costo_envio)||0) : 0;
+      const resultado = ejecutarHerramienta('enviar_link_pago', { telefono: demoTemp.direccion || 'Cliente demo', total_cuenta: totalCarrito(chatCarrito) + envio });
       chatMessages.push({ role:'assistant', kind:'text', text:`✅ Pedido registrado (folio ${resultado.id_pedido}, esto es una demo así que no hay cobro real). ¡Gracias por tu compra!`, time:nowLabel() });
       volverAlMenu();
     } else {
@@ -947,6 +972,12 @@ function cambiarQtyLocal(rid, delta, precio){
 }
 
 let meseroVista = 'mesas', meseroMesaActiva=null, meseroCategoriaActiva=null, meseroPlatilloActivo=null, meseroCantidadTmp=1;
+let cuentaModalPedidoId = null; // pedido para el que se está mostrando la cuenta / eligiendo método de pago
+const METODOS_PAGO = [
+  { id:'efectivo', label:'💵 Efectivo' },
+  { id:'tarjeta', label:'💳 Tarjeta' },
+  { id:'transferencia', label:'📲 Transferencia' },
+];
 let comandasEnCurso = {};
 const MESAS = Array.from({length:10},(_,i)=>i+1);
 
@@ -1002,6 +1033,16 @@ function marcarEstadoPedido(id, estado){
   syncFast('pedidos', {...p, items: JSON.stringify(p.items)});
   renderPantallaActual();
 }
+function abrirCuentaMesa(id){ cuentaModalPedidoId = id; renderMesero(); }
+function cerrarCuentaMesa(){ cuentaModalPedidoId = null; renderMesero(); }
+function cobrarMesaConMetodo(id, metodo){
+  const p = db.pedidos.find(x=>x.id===id); if(!p) return;
+  p.estado = 'cobrado';
+  p.metodoPago = metodo;
+  syncFast('pedidos', {...p, items: JSON.stringify(p.items)});
+  cuentaModalPedidoId = null;
+  renderPantallaActual();
+}
 
 function renderMesero(){
   const back = document.getElementById('meseroBack'), titulo = document.getElementById('meseroTitulo'), badge = document.getElementById('meseroCarritoBadge');
@@ -1034,7 +1075,7 @@ function renderMesero(){
             <span style="color:var(--accent);font-weight:600;font-size:14px">${mxn(p.total)}</span>
             <div style="display:flex;gap:6px">
               ${p.estado==='listo'?`<button class="btn btn-ghost btn-sm" onclick="marcarEstadoPedido('${p.id}','servido')">✓ Marcar servido</button>`:''}
-              ${p.estado==='servido'?`<button class="btn btn-accent btn-sm" onclick="marcarEstadoPedido('${p.id}','cobrado')">Cobrar y cerrar</button>`:''}
+              ${p.estado==='servido'?`<button class="btn btn-accent btn-sm" onclick="abrirCuentaMesa('${p.id}')">🧾 Pedir cuenta</button>`:''}
             </div>
           </div>
         </div>`).join('')}
@@ -1083,6 +1124,22 @@ function renderMesero(){
         </div>
         <button class="btn btn-accent btn-lg" style="width:100%" onclick="agregarAComanda('${p.id}',meseroCantidadTmp)">Agregar a la comanda · ${mxn(p.precio*meseroCantidadTmp)}</button>
         <button class="btn" style="width:100%;color:var(--text3);margin-top:6px" onclick="meseroPlatilloActivo=null;renderMesero()">Cancelar</button>
+      </div></div>`;
+  } else if(cuentaModalPedidoId){
+    const p = db.pedidos.find(x=>x.id===cuentaModalPedidoId);
+    if(!p){ cuentaModalPedidoId=null; document.getElementById('modalRoot').innerHTML=''; return; }
+    document.getElementById('modalRoot').innerHTML = `
+      <div class="modal-bg open"><div class="modal">
+        <h3>🧾 Cuenta — Mesa ${esc(p.mesa)}</h3>
+        <div style="margin-bottom:14px">
+          ${p.items.map(it=>`<div style="display:flex;justify-content:space-between;font-size:13px;padding:5px 0;border-bottom:1px solid var(--border)"><span>${it.cantidad} × ${esc(it.platillo)}</span></div>`).join('')}
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:18px"><span style="color:var(--text2)">Total a cobrar</span><span style="font-size:19px;font-weight:700;color:var(--accent)">${mxn(p.total)}</span></div>
+        <p style="font-size:11.5px;color:var(--text3);margin-bottom:8px">¿Cómo pagó el cliente?</p>
+        <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:10px">
+          ${METODOS_PAGO.map(m=>`<button class="btn btn-accent" style="width:100%" onclick="cobrarMesaConMetodo('${p.id}','${m.id}')">${m.label}</button>`).join('')}
+        </div>
+        <button class="btn btn-ghost" style="width:100%" onclick="cerrarCuentaMesa()">Cancelar</button>
       </div></div>`;
   } else {
     document.getElementById('modalRoot').innerHTML='';
