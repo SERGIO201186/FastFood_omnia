@@ -44,6 +44,7 @@ input,select,textarea{font-family:inherit;}
 .field textarea{resize:vertical;min-height:70px;}
 
 #gateView{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:500;padding:20px;}
+#rolView{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:450;padding:20px;}
 .gate-card{background:var(--panel2);border:1px solid var(--border);border-radius:18px;padding:30px 26px;max-width:380px;width:100%;text-align:center;}
 .gate-ico{font-size:34px;margin-bottom:10px;}
 .gate-card h2{font-size:18px;margin:0 0 8px;}
@@ -224,6 +225,17 @@ table.simple{border:1px solid var(--border);border-radius:10px;overflow:hidden;}
   </div>
 </div>
 
+<div id="rolView" class="hidden">
+  <div class="gate-card">
+    <div class="gate-ico">📱</div>
+    <h2>¿Qué va a hacer este dispositivo?</h2>
+    <p>Se pregunta una sola vez por dispositivo. Puedes cambiarlo después desde el Panel del dueño.</p>
+    <button class="btn btn-accent btn-lg" style="width:100%;margin-bottom:8px" onclick="elegirRolDispositivo('completo')">🧑‍💼 Todo (dueño / administración)</button>
+    <button class="btn btn-ghost btn-lg" style="width:100%;margin-bottom:8px" onclick="elegirRolDispositivo('mesero')">🍽️ Solo Mesero</button>
+    <button class="btn btn-ghost btn-lg" style="width:100%" onclick="elegirRolDispositivo('cocina')">👨‍🍳 Solo Cocina</button>
+  </div>
+</div>
+
 <div id="gateView" class="hidden">
   <div class="gate-card">
     <div class="gate-ico" id="gateIco">⏳</div>
@@ -280,6 +292,7 @@ table.simple{border:1px solid var(--border);border-radius:10px;overflow:hidden;}
     <div id="duenoPanelWrap" class="hidden">
       <div class="d-header">
         <h1>Panel del dueño</h1>
+        <button class="btn btn-ghost btn-sm" onclick="if(confirm('¿Cambiar qué es este dispositivo? Se te va a pedir elegir de nuevo (Todo / Mesero / Cocina).')) cambiarRolDispositivo();">📱 Cambiar rol de este dispositivo</button>
         <button class="btn btn-ghost btn-sm" onclick="cerrarSesionDueno()">Cerrar sesión</button>
       </div>
       <div class="stats-grid" id="duenoStats"></div>
@@ -475,16 +488,41 @@ async function verificarClaveGate(){
 
 async function arrancarAppReal(){
   await cargarTodoDesdeSheet();
-  document.getElementById('appView').classList.add('show');
   document.getElementById('chatNombreRest').textContent = cfg.nombre_restaurante || 'Mi Restaurante';
+  if(!getRolDispositivo()){
+    document.getElementById('rolView').classList.remove('hidden');
+    return; // se detiene aquí; elegirRolDispositivo() llama a arrancarConRol() al confirmar
+  }
+  arrancarConRol();
+}
+function arrancarConRol(){
+  document.getElementById('appView').classList.add('show');
+  const rol = getRolDispositivo();
   renderNav();
   iniciarChat();
-  irAPantalla('chat');
+  // La pantalla inicial depende del rol: cocina y mesero entran directo a su
+  // propia pantalla en vez de al chat, que ni siquiera ven en su barra.
+  const inicio = rol==='cocina' ? 'cocina' : rol==='mesero' ? 'mesero' : 'chat';
+  irAPantalla(inicio);
   setInterval(()=>{ if(pantallaActual==='cocina' || pantallaActual==='mesero') refrescarPedidosSilencioso(); }, 20000);
 }
 async function refrescarPedidosSilencioso(){
   const pedidos = await apiGet('pedidos');
   if(pedidos.length){ db.pedidos = pedidos.map(normalizarPedido); saveDbLocal(); renderPantallaActual(); }
+}
+
+function getRolDispositivo(){ return localStorage.getItem('ff_rol_dispositivo') || ''; }
+function setRolDispositivo(r){ localStorage.setItem('ff_rol_dispositivo', r); }
+function elegirRolDispositivo(r){
+  setRolDispositivo(r);
+  document.getElementById('rolView').classList.add('hidden');
+  arrancarConRol();
+}
+// Permite al dueño reconfigurar qué es este dispositivo (protegido por el PIN,
+// ya que solo se llega aquí desde dentro del panel del dueño).
+function cambiarRolDispositivo(){
+  localStorage.removeItem('ff_rol_dispositivo');
+  location.reload();
 }
 
 const NAV = [
@@ -493,10 +531,19 @@ const NAV = [
   {id:'cocina', ico:'👨‍🍳', label:'Cocina'},
   {id:'dueno', ico:'📊', label:'Dueño'},
 ];
+// Qué pestañas ve cada tipo de dispositivo. "dueno" siempre queda disponible
+// como puerta trasera protegida por PIN, para poder reconfigurar el
+// dispositivo sin tener que ir hasta la tablet del dueño.
+const NAV_POR_ROL = {
+  completo: ['chat','mesero','cocina','dueno'],
+  mesero:   ['mesero','dueno'],
+  cocina:   ['cocina','dueno'],
+};
 let pantallaActual = 'chat';
 function renderNav(){
   const activos = db.pedidos.filter(p=>['nuevo','preparacion','listo'].includes(p.estado)).length;
-  document.getElementById('bottomNav').innerHTML = NAV.map(n=>`
+  const permitidas = NAV_POR_ROL[getRolDispositivo()] || NAV_POR_ROL.completo;
+  document.getElementById('bottomNav').innerHTML = NAV.filter(n=>permitidas.includes(n.id)).map(n=>`
     <button class="${pantallaActual===n.id?'active':''}" onclick="irAPantalla('${n.id}')">
       <span class="ico">${n.ico}</span><span>${n.label}</span>
       ${n.id==='cocina' && activos>0 ? `<span class="badge">${activos}</span>` : ''}
