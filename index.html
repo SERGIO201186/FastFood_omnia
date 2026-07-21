@@ -210,6 +210,11 @@ table.simple{border:1px solid var(--border);border-radius:10px;overflow:hidden;}
 .modal-close-x{position:absolute;top:14px;right:14px;color:var(--text3);font-size:18px;}
 .img-drop{display:block;aspect-ratio:4/3;border-radius:10px;border:1px dashed var(--border);display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--text5);font-size:11px;margin-bottom:12px;cursor:pointer;overflow:hidden;text-align:center;}
 .img-drop img{width:100%;height:100%;object-fit:cover;}
+@media print {
+  body *{ visibility:hidden; }
+  #ticketImprimible, #ticketImprimible *{ visibility:visible; }
+  #ticketImprimible{ display:block !important; position:fixed; inset:0; background:#fff; }
+}
 </style>
 </head>
 <body>
@@ -305,6 +310,7 @@ table.simple{border:1px solid var(--border);border-radius:10px;overflow:hidden;}
 </div>
 
 <div id="modalRoot"></div>
+<div id="ticketImprimible" style="display:none"></div>
 
 <script>
 const OMNIA_CONTROL_URL = 'https://script.google.com/macros/s/AKfycbzhU4ElNfiCO808AgiXcIxj3cazaAdrtiXdpGJ_f-FnCb3LqsrseZbBSCJ7-WaMrxdWcA/exec';
@@ -332,6 +338,14 @@ function loadCfg(){
 function saveCfg(){ localStorage.setItem('ff_cfg', JSON.stringify(cfg)); }
 
 let db = { menu: [], pedidos: [], reservaciones: [], tickets: [] };
+// Cuando TÚ cambias un pedido (marcar listo, cobrar, etc.), el guardado al
+// Sheet no se espera (para que la pantalla responda al instante). Si el
+// refresco automático de 20s cae justo en ese hueco, puede traer de vuelta
+// el dato viejo y "deshacer" tu cambio visualmente. Este mapa evita eso:
+// por unos segundos, el refresco respeta lo que tú acabas de tocar.
+let cambiosLocalesRecientes = {}; // { [pedidoId]: timestamp }
+const VENTANA_PROTECCION_MS = 8000;
+function marcarCambioLocal(id){ cambiosLocalesRecientes[id] = Date.now(); }
 let esDemoSinIA = false; // true cuando la licencia es demo: el chat responde con guion fijo, sin llamar a ninguna IA
 function sembrarMenuDemo(){
   if(db.menu.length) return; // no pisar datos si ya hay algo guardado localmente
@@ -508,7 +522,19 @@ function arrancarConRol(){
 }
 async function refrescarPedidosSilencioso(){
   const pedidos = await apiGet('pedidos');
-  if(pedidos.length){ db.pedidos = pedidos.map(normalizarPedido); saveDbLocal(); renderPantallaActual(); }
+  if(!pedidos.length) return;
+  const ahora = Date.now();
+  const frescos = pedidos.map(normalizarPedido);
+  // Por cada pedido que tú modificaste hace poco, conserva tu versión local
+  // en vez de la que acaba de llegar del Sheet (puede estar desactualizada
+  // si tu escritura todavía no aterrizaba cuando se disparó este refresco).
+  db.pedidos = frescos.map(fresco => {
+    const tocadoHaceRato = cambiosLocalesRecientes[fresco.id] && (ahora - cambiosLocalesRecientes[fresco.id] < VENTANA_PROTECCION_MS);
+    if (!tocadoHaceRato) return fresco;
+    const local = db.pedidos.find(p => p.id === fresco.id);
+    return local || fresco;
+  });
+  saveDbLocal(); renderPantallaActual();
 }
 
 function getRolDispositivo(){ return localStorage.getItem('ff_rol_dispositivo') || ''; }
@@ -973,6 +999,7 @@ function cambiarQtyLocal(rid, delta, precio){
 
 let meseroVista = 'mesas', meseroMesaActiva=null, meseroCategoriaActiva=null, meseroPlatilloActivo=null, meseroCantidadTmp=1;
 let cuentaModalPedidoId = null; // pedido para el que se está mostrando la cuenta / eligiendo método de pago
+let ticketParaImprimir = null; // pedido recién cobrado, mostrando pantalla de "imprimir ticket"
 const METODOS_PAGO = [
   { id:'efectivo', label:'💵 Efectivo' },
   { id:'tarjeta', label:'💳 Tarjeta' },
@@ -1010,19 +1037,18 @@ function enviarACocina(){
   const comanda = comandasEnCurso[meseroMesaActiva]||[];
   if(comanda.length===0) return;
   const total = totalCarrito(comanda);
-  const existente = pedidoActivoDeMesa(meseroMesaActiva);
   const itemsNuevos = comanda.map(it=>({cantidad:it.cantidad, platillo:it.platillo}));
-  if(existente){
-    existente.items = [...existente.items, ...itemsNuevos];
-    existente.total = existente.total + total;
-    existente.hora = nowLabel();
-    syncFast('pedidos', {...existente, items: JSON.stringify(existente.items)});
-  } else {
-    const id = uid('MSA');
-    const pedido = { id, origen:'mesa', mesa:meseroMesaActiva, referencia:`Mesa ${meseroMesaActiva}`, items: itemsNuevos, total, estado:'nuevo', hora:nowLabel(), fecha:new Date().toISOString() };
-    db.pedidos.push(pedido);
-    syncFast('pedidos', {...pedido, items: JSON.stringify(itemsNuevos)});
-  }
+  // Antes esto se fusionaba con un pedido existente de la misma mesa — el
+  // problema era que si ese pedido ya estaba "listo" o "en cocina", los
+  // platillos nuevos se sumaban ahí sin que la cocina se enterara (el estado
+  // no cambiaba). Ahora cada envío es un pedido nuevo e independiente, así
+  // la cocina siempre ve una comanda "Nueva" cuando agregas algo, aunque la
+  // mesa ya tuviera un pedido en curso.
+  const id = uid('MSA');
+  const pedido = { id, origen:'mesa', mesa:meseroMesaActiva, referencia:`Mesa ${meseroMesaActiva}`, items: itemsNuevos, total, estado:'nuevo', hora:nowLabel(), fecha:new Date().toISOString() };
+  db.pedidos.push(pedido);
+  marcarCambioLocal(id);
+  syncFast('pedidos', {...pedido, items: JSON.stringify(itemsNuevos)});
   comandasEnCurso[meseroMesaActiva]=[];
   meseroVista='mesas'; meseroMesaActiva=null;
   renderMesero();
@@ -1030,6 +1056,7 @@ function enviarACocina(){
 function marcarEstadoPedido(id, estado){
   const p = db.pedidos.find(x=>x.id===id); if(!p) return;
   p.estado = estado;
+  marcarCambioLocal(id);
   syncFast('pedidos', {...p, items: JSON.stringify(p.items)});
   renderPantallaActual();
 }
@@ -1039,8 +1066,10 @@ function cobrarMesaConMetodo(id, metodo){
   const p = db.pedidos.find(x=>x.id===id); if(!p) return;
   p.estado = 'cobrado';
   p.metodoPago = metodo;
+  marcarCambioLocal(id);
   syncFast('pedidos', {...p, items: JSON.stringify(p.items)});
   cuentaModalPedidoId = null;
+  ticketParaImprimir = { ...p }; // abre la pantalla de "cobrado, ¿imprimir ticket?"
   renderPantallaActual();
 }
 
@@ -1060,12 +1089,14 @@ function renderMesero(){
     const pedidosDeMesas = db.pedidos.filter(p=>p.origen==='mesa' && p.estado!=='cobrado');
     body.innerHTML = `
       <div class="mesas-grid">${MESAS.map(mesa=>{
-        const p = pedidoActivoDeMesa(mesa);
-        const cls = p ? (p.estado==='servido'?'servida':'ocupada') : '';
-        const lbl = p ? ({nuevo:'Nuevo',preparacion:'En cocina',listo:'Listo',servido:'Servido'}[p.estado]||'') : '';
+        const activosDeEstaMesa = pedidosDeMesas.filter(p=>String(p.mesa)===String(mesa));
+        const p = activosDeEstaMesa[0];
+        const cls = p ? (activosDeEstaMesa.every(x=>x.estado==='servido')?'servida':'ocupada') : '';
+        const lbl = p ? (activosDeEstaMesa.length>1 ? `${activosDeEstaMesa.length} pedidos` : ({nuevo:'Nuevo',preparacion:'En cocina',listo:'Listo',servido:'Servido'}[p.estado]||'')) : '';
         return `<button class="mesa-btn ${cls}" onclick="abrirMesa(${mesa})"><span class="num">${mesa}</span>${p?`<span class="est">${lbl}</span>`:''}</button>`;
       }).join('')}</div>
       <p style="color:var(--text3);font-size:11px;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px">👨‍🍳 Comandas activas</p>
+      <p style="color:var(--text4);font-size:10.5px;margin-top:-6px;margin-bottom:10px">Si una mesa ya tiene un pedido en curso, puedes agregar más platillos y se envía como una comanda nueva y separada — así la cocina siempre la ve, aunque la anterior ya esté lista.</p>
       ${pedidosDeMesas.length===0?`<p style="color:var(--text5);font-size:12px;font-style:italic">Ninguna mesa tiene pedido enviado a cocina.</p>`:
         pedidosDeMesas.map(p=>`
         <div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:11px;margin-bottom:8px">
@@ -1141,9 +1172,48 @@ function renderMesero(){
         </div>
         <button class="btn btn-ghost" style="width:100%" onclick="cerrarCuentaMesa()">Cancelar</button>
       </div></div>`;
+  } else if(ticketParaImprimir){
+    const p = ticketParaImprimir;
+    const metodoLbl = (METODOS_PAGO.find(m=>m.id===p.metodoPago)||{}).label || p.metodoPago;
+    document.getElementById('modalRoot').innerHTML = `
+      <div class="modal-bg open"><div class="modal">
+        <h3>✅ Cobrado — Mesa ${esc(p.mesa)}</h3>
+        <p style="font-size:13px;color:var(--text2);margin-bottom:16px">Pagado con ${esc(metodoLbl)} · ${mxn(p.total)}</p>
+        <button class="btn btn-accent btn-lg" style="width:100%;margin-bottom:8px" onclick="imprimirTicket(${esc(JSON.stringify(p))})">🖨️ Imprimir ticket</button>
+        <button class="btn btn-ghost" style="width:100%" onclick="ticketParaImprimir=null;renderMesero()">Cerrar sin imprimir</button>
+      </div></div>`;
   } else {
     document.getElementById('modalRoot').innerHTML='';
   }
+}
+
+// Imprime un ticket de pago usando el diálogo de impresión normal del
+// navegador — funciona con cualquier impresora que ya tengas instalada en
+// la tablet/PC (térmica de tickets o normal), sin conectar nada especial.
+function imprimirTicket(pedido){
+  const fecha = new Date(pedido.fecha || Date.now());
+  const metodoLbl = (METODOS_PAGO.find(m=>m.id===pedido.metodoPago)||{}).label || pedido.metodoPago || '';
+  document.getElementById('ticketImprimible').innerHTML = `
+    <div style="font-family:'Courier New',monospace;width:280px;margin:0 auto;color:#000">
+      <div style="text-align:center;margin-bottom:10px">
+        <div style="font-weight:700;font-size:15px">${esc(cfg.nombre_restaurante||'Mi Restaurante')}</div>
+        <div style="font-size:11px">${esc(cfg.ubicacion||'')}</div>
+      </div>
+      <div style="border-top:1px dashed #000;border-bottom:1px dashed #000;padding:6px 0;margin-bottom:8px;font-size:11px">
+        <div>Folio: ${esc(pedido.id)}</div>
+        <div>${esc(pedido.origen==='mesa'?('Mesa '+pedido.mesa):'Pedido en línea')}</div>
+        <div>${fecha.toLocaleDateString('es-MX')} ${fecha.toLocaleTimeString('es-MX')}</div>
+      </div>
+      <div style="font-size:12px;margin-bottom:8px">
+        ${pedido.items.map(it=>`<div style="display:flex;justify-content:space-between"><span>${it.cantidad}× ${esc(it.platillo)}</span></div>`).join('')}
+      </div>
+      <div style="border-top:1px dashed #000;padding-top:6px;display:flex;justify-content:space-between;font-weight:700;font-size:14px">
+        <span>TOTAL</span><span>${mxn(pedido.total)}</span>
+      </div>
+      <div style="font-size:11px;margin-top:4px">Método de pago: ${esc(metodoLbl)}</div>
+      <div style="text-align:center;font-size:11px;margin-top:14px">¡Gracias por tu compra!</div>
+    </div>`;
+  window.print();
 }
 
 const COLUMNAS_COCINA = [
