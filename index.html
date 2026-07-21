@@ -329,6 +329,9 @@ function mxn(n){ return '$'+(Number(n)||0).toFixed(2); }
 
 let cfg = {
   url:'', nombre_restaurante:'Mi Restaurante', ubicacion:'', horario_atencion:'Todos los días, 1:00 PM – 10:00 PM',
+  hora_apertura:'13:00', hora_cierre:'22:00',
+  modelo_envio:'terceros', // 'terceros' = un repartidor externo cotiza y cobra el envío directo; 'propio' = la empresa reparte y cobra según distancia
+  envio_distancia_gratis_km:3, envio_costo_extra:30,
   telefono_restaurante:'', link_ubicacion:'', capacidad_personas_por_turno:30,
   tiempo_preparacion_pickup_min:20, tiempo_entrega_domicilio_min:35, costo_envio:30, pin_dueno:'0000',
 };
@@ -634,11 +637,33 @@ function buscarPlatilloPorTitulo(titulo){
   const norm = String(titulo||'').toLowerCase();
   return db.menu.find(p=> norm.includes(p.platillo.toLowerCase()) || p.platillo.toLowerCase().includes(norm));
 }
+// Compara la hora actual contra hora_apertura/hora_cierre (formato "HH:MM").
+// Soporta horarios que cruzan la medianoche (ej. abre 18:00, cierra 02:00).
+function estaAbierto(){
+  const [ha,ma] = String(cfg.hora_apertura||'00:00').split(':').map(Number);
+  const [hc,mc] = String(cfg.hora_cierre||'23:59').split(':').map(Number);
+  const ahora = new Date();
+  const minAhora = ahora.getHours()*60 + ahora.getMinutes();
+  const minApertura = (ha||0)*60 + (ma||0);
+  const minCierre = (hc||0)*60 + (mc||0);
+  if(minCierre > minApertura) return minAhora >= minApertura && minAhora < minCierre; // horario normal, mismo día
+  return minAhora >= minApertura || minAhora < minCierre; // cruza la medianoche
+}
 function construirSystemPrompt(){
   const v = cfg;
+  const abierto = estaAbierto();
+  const bloqueEnvio = v.modelo_envio === 'propio'
+    ? `El envío lo hace el propio restaurante: es GRATIS hasta ${v.envio_distancia_gratis_km} km de distancia; más allá de eso tiene un costo adicional de $${v.envio_costo_extra} MXN. No sabes calcular distancias exactas — si el cliente no sabe si está dentro del rango, dile que el costo se confirma al recibir su dirección completa y que el equipo se lo confirma.`
+    : `El envío lo hace un repartidor independiente, NO el restaurante: su costo se cotiza aparte según la distancia y SE PAGA DIRECTO AL REPARTIDOR al momento de la entrega (no se cobra junto con el pedido ni por el link de pago). Deja esto claro al cliente cuando hable de domicilio: el total que confirmes y cobres por enviar_link_pago es solo por los platillos, el envío se paga aparte al repartidor.`;
+  const bloqueHorario = abierto ? '' : `
+
+⚠️ AHORA MISMO EL RESTAURANTE ESTÁ CERRADO (horario: ${v.horario_atencion}). Aun así:
+- Puedes tomar reservaciones de mesa normalmente (usa las herramientas de siempre).
+- Puedes tomar pedidos normalmente (menú, cantidad, dirección, todo igual), PERO antes de cerrar avísale con claridad al cliente que el restaurante está cerrado en este momento, y que por eso: 1) el pedido se tiene que pagar por adelantado con el link de pago — no ofrezcas ni aceptes "pagar al recibir/en el local" mientras esté cerrado, usa enviar_link_pago siempre; 2) su pedido se preparará y enviará (o quedará listo para recoger) en cuanto el restaurante abra, no de inmediato. Sé transparente con esto desde antes de pedir el pago, no lo menciones hasta el final.`;
+
   return `Eres Sofía, la asistente virtual inteligente de ${v.nombre_restaurante}, un lugar de comida rápida con toque casero ubicado en ${v.ubicacion||'la ciudad'}. Especialidad: ver el menú disponible más abajo.
 
-Canales de servicio: mesas en el lugar (con reservación disponible para grupos), pedidos para recoger (pick-up) y pedidos a domicilio (envío). Horario: ${v.horario_atencion}.
+Canales de servicio: mesas en el lugar (con reservación disponible para grupos), pedidos para recoger (pick-up) y pedidos a domicilio (envío). Horario: ${v.horario_atencion}. Estado ahora mismo: el restaurante está ${abierto?'ABIERTO':'CERRADO'}.${bloqueHorario}
 
 REGLAS ABSOLUTAS
 1. Tono profesional, cálido, cortés, muy conciso. Mensajes cortos; si necesitas dar varias ideas en texto libre, sepáralas con "|||" (máximo 3 burbujas).
@@ -669,12 +694,13 @@ Estado 2 (reservaciones): pide fecha → hora → personas, uno a la vez, en tex
 Estado 3 (pedidos — para recoger o a domicilio): este es tu catálogo real, no inventes nada fuera de esta lista:
 ${menuComoTexto()}
 
-Costo de envío a domicilio: $${v.costo_envio} MXN adicional. Tiempo estimado: recoger ~${v.tiempo_preparacion_pickup_min} min, a domicilio ~${v.tiempo_entrega_domicilio_min} min.
+${bloqueEnvio}
+Tiempo estimado (con el restaurante abierto): recoger ~${v.tiempo_preparacion_pickup_min} min, a domicilio ~${v.tiempo_entrega_domicilio_min} min.
 
-Cuando el cliente quiera hacer un pedido, primero usa mostrar_botones para preguntar: ["Recoger en el local","Envío a domicilio","Ver el menú primero"]. Si elige domicilio, pide su dirección completa en texto libre en algún momento antes de cerrar, y recuérdale el costo de envío.
+Cuando el cliente quiera hacer un pedido, primero usa mostrar_botones para preguntar: ["Recoger en el local","Envío a domicilio","Ver el menú primero"]. Si elige domicilio, pide su dirección completa en texto libre en algún momento antes de cerrar.
 Para elegir platillos: usa mostrar_lista con las categorías (una fila por categoría, sin precio). Cuando elija una categoría, usa mostrar_lista de nuevo con los platillos de esa categoría. Cuando el cliente TOQUE o mencione un platillo específico, usa INMEDIATAMENTE mostrar_selector_cantidad — tú NUNCA preguntes la cantidad por texto.
 Cada [[TOOL_RESULT:mostrar_selector_cantidad]] trae carrito_actual y total_acumulado — son los datos reales, no hagas tu propia suma. Después de cada platillo, pregunta con mostrar_botones si desea ["Agregar otro platillo","Ya terminé mi pedido"].
-Cuando el cliente termine: 1) si es domicilio y falta la dirección, pídela y detente ahí; 2) recita el resumen con el carrito_actual más reciente, suma envío si aplica, confirma total y tiempo; 3) pregunta con mostrar_botones (Sí/No) si desea el enlace de pago; 4) si acepta, usa OBLIGATORIAMENTE enviar_link_pago — nunca digas que ya se envió sin usar la herramienta de verdad.
+Cuando el cliente termine: 1) si es domicilio y falta la dirección, pídela y detente ahí; 2) recita el resumen con el carrito_actual más reciente (el total del link de pago NUNCA incluye el envío si el modelo es "terceros" — eso se paga aparte al repartidor), confirma y tiempo; 3) pregunta con mostrar_botones (Sí/No) si desea el enlace de pago — si el restaurante está cerrado, no es opcional, dile que es la única forma de confirmar el pedido mientras está cerrado; 4) si acepta, usa OBLIGATORIAMENTE enviar_link_pago — nunca digas que ya se envió sin usar la herramienta de verdad.
 Estado 4 (información general): responde en texto libre; si no sabes, no inventes. Para cómo llegar, comparte la dirección (${v.ubicacion}) ${v.link_ubicacion?('y este enlace: '+v.link_ubicacion):''}.
 
 Usa mostrar_botones para 2-3 opciones, mostrar_lista para más de 3. Texto libre para información abierta (fecha, nombre, dirección). O usas una herramienta de verdad con su etiqueta exacta, o no la menciones.`;
@@ -961,9 +987,7 @@ function renderChat(){
     if(m.kind==='list') return `<div class="msg-row assistant"><div class="list-card">
         <div class="msg">${esc(m.text)}</div>
         <div class="items">${m.opciones.map(op=>{
-          const p = buscarPlatilloPorTitulo(op.titulo);
           return `<button ${chatHandoff||chatTyping?'disabled':''} onclick="enviarMensajeChat(${esc(JSON.stringify(op.titulo))})">
-            ${p?`<div class="item-ico" style="background:linear-gradient(135deg, ${p.color||'#C7703C'}, #1F1B16)">${p.imagen?`<img src="${p.imagen}">`:esc(p.emoji||'🍽️')}</div>`:''}
             <div><div style="font-size:13px;color:var(--text);font-weight:500">${esc(op.titulo)}</div>${op.descripcion?`<div style="font-size:11px;color:var(--text2)">${esc(op.descripcion)}</div>`:''}</div>
           </button>`;
         }).join('')}</div>
@@ -1000,7 +1024,7 @@ function renderSelectorCantidad(m){
   window['__qty_'+rid] = 1;
   return `<div class="qty-card" id="${rid}">
     <div class="top">
-      <div class="ico" style="background:linear-gradient(135deg, ${info&&info.color||'#C7703C'}, #1F1B16)">${info&&info.imagen?`<img src="${info.imagen}" style="width:100%;height:100%;object-fit:cover;border-radius:10px">`:esc(info&&info.emoji||'🍽️')}</div>
+      <div class="ico" style="background:linear-gradient(135deg, ${info&&info.color||'#C7703C'}, #1F1B16)">${esc(info&&info.emoji||'🍽️')}</div>
       <div><div class="n">${esc(m.platillo)}</div><div class="p">${mxn(m.precioUnitario)} c/u</div></div>
     </div>
     <div class="bot">
@@ -1022,6 +1046,7 @@ function cambiarQtyLocal(rid, delta, precio){
 
 let meseroVista = 'mesas', meseroMesaActiva=null, meseroCategoriaActiva=null, meseroPlatilloActivo=null, meseroCantidadTmp=1;
 let cuentaModalMesa = null; // mesa para la que se está mostrando la cuenta combinada / eligiendo método de pago
+let notasComandaTmp = {}; // { [mesa]: "texto de la nota mientras se arma la comanda" }
 let ticketParaImprimir = null; // pedido recién cobrado, mostrando pantalla de "imprimir ticket"
 const METODOS_PAGO = [
   { id:'efectivo', label:'💵 Efectivo' },
@@ -1068,10 +1093,11 @@ function enviarACocina(){
   // la cocina siempre ve una comanda "Nueva" cuando agregas algo, aunque la
   // mesa ya tuviera un pedido en curso.
   const id = uid('MSA');
-  const pedido = { id, origen:'mesa', mesa:meseroMesaActiva, referencia:`Mesa ${meseroMesaActiva}`, items: itemsNuevos, total, estado:'nuevo', hora:nowLabel(), fecha:new Date().toISOString() };
+  const pedido = { id, origen:'mesa', mesa:meseroMesaActiva, referencia:`Mesa ${meseroMesaActiva}`, items: itemsNuevos, total, estado:'nuevo', hora:nowLabel(), fecha:new Date().toISOString(), notas: notasComandaTmp[meseroMesaActiva]||'' };
   db.pedidos.push(pedido);
   marcarCambioLocal(id);
   syncFast('pedidos', {...pedido, items: JSON.stringify(itemsNuevos)});
+  notasComandaTmp[meseroMesaActiva] = '';
   comandasEnCurso[meseroMesaActiva]=[];
   meseroVista='mesas'; meseroMesaActiva=null;
   renderMesero();
@@ -1137,9 +1163,12 @@ function renderMesero(){
         return `
         <div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:11px;margin-bottom:8px">
           <div style="display:flex;justify-content:space-between;margin-bottom:5px"><span style="font-weight:600;font-size:14px">Mesa ${esc(mesa)}${pedidosMesa.length>1?` · ${pedidosMesa.length} comandas`:''}</span></div>
-          ${pedidosMesa.map(p=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0">
-            <span style="color:var(--text3);font-size:11px">${p.items.map(it=>`${it.cantidad}× ${esc(it.platillo)}`).join(', ')}</span>
-            <span class="order-tag" style="background:${p.estado==='servido'?'var(--success-bg)':'var(--panel2)'};color:${p.estado==='servido'?'var(--success)':'var(--accent)'};flex-shrink:0;margin-left:8px">${({nuevo:'Nuevo',preparacion:'En cocina',listo:'Listo',servido:'Servido'}[p.estado]||p.estado)}</span>
+          ${pedidosMesa.map(p=>`<div style="padding:3px 0">
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <span style="color:var(--text3);font-size:11px">${p.items.map(it=>`${it.cantidad}× ${esc(it.platillo)}`).join(', ')}</span>
+              <span class="order-tag" style="background:${p.estado==='servido'?'var(--success-bg)':'var(--panel2)'};color:${p.estado==='servido'?'var(--success)':'var(--accent)'};flex-shrink:0;margin-left:8px">${({nuevo:'Nuevo',preparacion:'En cocina',listo:'Listo',servido:'Servido'}[p.estado]||p.estado)}</span>
+            </div>
+            ${p.notas?`<div style="color:#E8927D;font-size:10.5px;margin-top:2px">📝 ${esc(p.notas)}</div>`:''}
           </div>`).join('')}
           <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
             <span style="color:var(--accent);font-weight:600;font-size:14px">${mxn(totalMesa)}</span>
@@ -1174,6 +1203,7 @@ function renderMesero(){
           <button onclick="quitarDeComanda(${esc(JSON.stringify(it.platillo))})" style="color:var(--text4)">🗑</button>
         </div>`).join('')}
       <div style="display:flex;justify-content:space-between;margin:14px 4px"><span style="color:var(--text2)">Total</span><span style="font-size:17px;font-weight:600">${mxn(totalCarrito(comandaActual))}</span></div>
+      <div class="field"><label>📝 Notas / observaciones (opcional)</label><textarea id="notaComanda" rows="2" oninput="notasComandaTmp[meseroMesaActiva]=this.value" placeholder="Ej: sin cebolla, alergia a los cacahuates, para llevar...">${esc(notasComandaTmp[meseroMesaActiva]||'')}</textarea></div>
       <button class="btn btn-accent btn-lg" style="width:100%" ${comandaActual.length===0?'disabled':''} onclick="enviarACocina()">➤ Enviar a cocina</button>
       <button class="btn" style="width:100%;color:var(--text3);margin-top:6px" onclick="meseroVista='platillos';renderMesero()">+ Agregar otro platillo</button>
     `;
@@ -1280,6 +1310,7 @@ function renderCocina(){
             </div>
             <div class="ref">${esc(p.referencia||'')}</div>
             <ul>${p.items.map(it=>`<li>${it.cantidad}× ${esc(it.platillo)}</li>`).join('')}</ul>
+            ${p.notas?`<div style="background:#B23A2E22;color:#E8927D;border-radius:6px;padding:5px 7px;font-size:11px;margin:4px 0">📝 ${esc(p.notas)}</div>`:''}
             <div class="bot">
               <span class="total">${mxn(p.total)}</span>
               ${col.siguiente?`<button class="btn btn-accent btn-sm" onclick="marcarEstadoPedido('${p.id}','${col.siguiente}')">${col.accion} →</button>`
@@ -1303,7 +1334,7 @@ function renderDueno(){
           <div class="gate-ico">🍔</div>
           <h2>${esc(cfg.nombre_restaurante)}</h2>
           <p>Panel de administración — pide el PIN para entrar.</p>
-          <div class="field"><label>PIN</label><input id="duenoPinInput" type="password" placeholder="••••" onkeydown="if(event.key==='Enter')intentarLoginDueno()"></div>
+          <div class="field"><label>PIN</label><input id="duenoPinInput" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" style="-webkit-text-security:disc;text-security:disc" placeholder="••••" onkeydown="if(event.key==='Enter')intentarLoginDueno()"></div>
           <button class="btn btn-accent btn-lg" style="width:100%" onclick="intentarLoginDueno()">Entrar →</button>
           <p id="duenoLoginAviso" style="color:var(--danger);font-size:12px;margin-top:8px;display:none"></p>
         </div>
@@ -1455,19 +1486,36 @@ function reactivarTicket(id){
 
 function viewDuenoConfig(){
   const campos = [
-    ['nombre_restaurante','Nombre del restaurante'],['ubicacion','Ubicación'],['horario_atencion','Horario de atención'],
+    ['nombre_restaurante','Nombre del restaurante'],['ubicacion','Ubicación'],['horario_atencion','Horario de atención (texto que ve el cliente)'],
+    ['hora_apertura','Hora de apertura (HH:MM, 24h)'],['hora_cierre','Hora de cierre (HH:MM, 24h)'],
     ['telefono_restaurante','Teléfono'],['link_ubicacion','Link de ubicación (Maps)'],['capacidad_personas_por_turno','Capacidad por turno'],
-    ['tiempo_preparacion_pickup_min','Minutos para recoger'],['tiempo_entrega_domicilio_min','Minutos a domicilio'],['costo_envio','Costo de envío'],['pin_dueno','PIN de acceso al panel'],
+    ['tiempo_preparacion_pickup_min','Minutos para recoger'],['tiempo_entrega_domicilio_min','Minutos a domicilio'],['pin_dueno','PIN de acceso al panel'],
   ];
   return `<div style="max-width:420px">
     <p style="font-weight:600;margin-bottom:14px">⚙️ Configuración del restaurante</p>
     ${campos.map(([key,label])=>`<div class="field"><label>${label}</label><input id="cfg-${key}" value="${esc(cfg[key]??'')}"></div>`).join('')}
-    <button class="btn btn-accent btn-lg" style="width:100%;margin-top:6px" onclick="guardarConfigDueno()">Guardar cambios</button>
-    <p style="color:var(--text5);font-size:11px;font-style:italic;margin-top:10px">Cambia el horario o el costo de envío aquí y pruébalo de inmediato en la pestaña "Chat".</p>
+
+    <p style="font-weight:600;margin:18px 0 8px">🛵 Envío a domicilio</p>
+    <div class="field"><label>¿Quién hace el envío?</label>
+      <select id="cfg-modelo_envio" onchange="document.getElementById('cfg-envio-propio-wrap').style.display=this.value==='propio'?'':'none';document.getElementById('cfg-envio-terceros-wrap').style.display=this.value==='propio'?'none':'';">
+        <option value="terceros" ${cfg.modelo_envio!=='propio'?'selected':''}>Repartidor independiente (cotiza y le pagan a él directo)</option>
+        <option value="propio" ${cfg.modelo_envio==='propio'?'selected':''}>El restaurante reparte (gratis hasta cierta distancia)</option>
+      </select>
+    </div>
+    <div id="cfg-envio-propio-wrap" style="${cfg.modelo_envio==='propio'?'':'display:none'}">
+      <div class="field"><label>Envío gratis hasta (km)</label><input id="cfg-envio_distancia_gratis_km" value="${esc(cfg.envio_distancia_gratis_km??'')}"></div>
+      <div class="field"><label>Costo de envío más allá de esa distancia ($)</label><input id="cfg-envio_costo_extra" value="${esc(cfg.envio_costo_extra??'')}"></div>
+    </div>
+    <div id="cfg-envio-terceros-wrap" style="${cfg.modelo_envio==='propio'?'display:none':''}">
+      <p style="color:var(--text4);font-size:11px;margin:0 0 10px">El chat le va a explicar al cliente que el envío se cotiza y se paga directo al repartidor, aparte del total del pedido.</p>
+    </div>
+
+    <button class="btn btn-accent btn-lg" style="width:100%;margin-top:14px" onclick="guardarConfigDueno()">Guardar cambios</button>
+    <p style="color:var(--text5);font-size:11px;font-style:italic;margin-top:10px">Cambia el horario o el envío aquí y pruébalo de inmediato en la pestaña "Chat". Ahora mismo el restaurante está marcado como <strong>${estaAbierto()?'ABIERTO':'CERRADO'}</strong> según la hora de apertura/cierre configurada.</p>
   </div>`;
 }
 function guardarConfigDueno(){
-  const campos = ['nombre_restaurante','ubicacion','horario_atencion','telefono_restaurante','link_ubicacion','capacidad_personas_por_turno','tiempo_preparacion_pickup_min','tiempo_entrega_domicilio_min','costo_envio','pin_dueno'];
+  const campos = ['nombre_restaurante','ubicacion','horario_atencion','hora_apertura','hora_cierre','telefono_restaurante','link_ubicacion','capacidad_personas_por_turno','tiempo_preparacion_pickup_min','tiempo_entrega_domicilio_min','pin_dueno','modelo_envio','envio_distancia_gratis_km','envio_costo_extra'];
   campos.forEach(key=>{
     const val = document.getElementById('cfg-'+key).value.trim();
     cfg[key] = val;
