@@ -2,15 +2,20 @@
 // Pega este código en script.google.com y despliega como Web App.
 //
 // PROPIEDADES DEL SCRIPT que debes configurar (⚙️ Configuración del proyecto
-// → Propiedades del script) — NUNCA escribas la clave directo en el código:
+// → Propiedades del script) — NUNCA escribas estos valores directo en el código:
 //   ANTHROPIC_API_KEY   sk-ant-... (la clave del restaurante, cada uno paga su propio uso)
+//   DASHBOARD_SECRET    la misma contraseña que capturas en la app al conectar el Sheet.
+//                        Sin esto, CUALQUIERA que descubra la URL /exec podría leer y
+//                        borrar tus datos, y hasta gastar tu ANTHROPIC_API_KEY sin límite.
 
 const SS_ID = SpreadsheetApp.getActiveSpreadsheet().getId();
 const ANTHROPIC_MODEL = 'claude-sonnet-5';
 
 function doGet(e) {
+  if (!secretValido(e.parameter.secret)) return json({ ok: false, error: 'No autorizado' });
   const action = e.parameter.action || '';
   if (action === 'get') {
+    liberarPedidosProgramados();
     const sheet = getSheet(e.parameter.sheet || 'menu');
     const rows = sheet.getDataRange().getValues();
     if (rows.length < 2) return json({ ok: true, data: [] });
@@ -26,6 +31,7 @@ function doGet(e) {
 function doPost(e) {
   try {
     const body = JSON.parse(e.postData.contents);
+    if (!secretValido(body.secret)) return json({ ok: false, error: 'No autorizado' });
     const { action, sheet: sheetName, data, id } = body;
 
     if (action === 'chatComplete') return handleChatComplete(body);
@@ -114,6 +120,41 @@ function handleChatComplete(body) {
 
   const texto = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
   return json({ ok: true, text: texto });
+}
+
+// =====================================================================
+// SEGURIDAD — todo doGet/doPost exige la contraseña del panel.
+// =====================================================================
+function secretValido(recibido) {
+  const esperado = PropertiesService.getScriptProperties().getProperty('DASHBOARD_SECRET') || '';
+  return !!esperado && recibido === esperado;
+}
+
+// =====================================================================
+// Pasa a "nuevo" (visible en cocina) los pedidos "programado" cuya
+// hora_liberacion ya se cumplió. Se ejecuta en cada lectura (doGet) para
+// no depender de configurar un disparador por tiempo aparte en Apps Script:
+// mesero/cocina ya consultan el Sheet cada 20s mientras están abiertos.
+// =====================================================================
+function liberarPedidosProgramados() {
+  const sheet = getSheet('pedidos');
+  const rows = sheet.getDataRange().getValues();
+  if (rows.length < 2) return;
+  const headers = rows[0];
+  const estadoCol = headers.indexOf('estado');
+  const liberacionCol = headers.indexOf('hora_liberacion');
+  if (estadoCol < 0 || liberacionCol < 0) return;
+  const ahora = Date.now();
+  for (let i = 1; i < rows.length; i++) {
+    const row = rows[i];
+    if (row[estadoCol] !== 'programado') continue;
+    const liberacion = row[liberacionCol];
+    if (!liberacion) continue;
+    const t = new Date(liberacion).getTime();
+    if (!isNaN(t) && t <= ahora) {
+      sheet.getRange(i + 1, estadoCol + 1).setValue('nuevo');
+    }
+  }
 }
 
 // =====================================================================
