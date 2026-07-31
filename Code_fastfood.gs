@@ -36,44 +36,56 @@ function doPost(e) {
 
     if (action === 'chatComplete') return handleChatComplete(body);
 
-    if (action === 'sync_all') {
-      Object.keys(data || {}).forEach(sheetKey => {
-        const s = getSheet(sheetKey);
-        const h = s.getRange(1, 1, 1, s.getLastColumn()).getValues()[0];
-        const lastRow = s.getLastRow();
-        if (lastRow > 1) s.deleteRows(2, lastRow - 1);
-        (data[sheetKey] || []).forEach(d => s.appendRow(h.map(col => d[col] ?? '')));
-      });
-      return json({ ok: true });
-    }
+    // Todo lo de aquí para abajo primero LEE el Sheet (para encontrar la fila
+    // a actualizar) y hasta después ESCRIBE. En hora pico, con varios
+    // meseros y clientes de chat mandando pedidos al mismo tiempo, dos
+    // ejecuciones podían leer el mismo estado "viejo" y pisarse la escritura
+    // una a la otra (una orden se perdía sin ningún error visible). El lock
+    // serializa estas escrituras para que eso no pase.
+    const lock = LockService.getScriptLock();
+    lock.waitLock(10000);
+    try {
+      if (action === 'sync_all') {
+        Object.keys(data || {}).forEach(sheetKey => {
+          const s = getSheet(sheetKey);
+          const h = s.getRange(1, 1, 1, s.getLastColumn()).getValues()[0];
+          const lastRow = s.getLastRow();
+          if (lastRow > 1) s.deleteRows(2, lastRow - 1);
+          (data[sheetKey] || []).forEach(d => s.appendRow(h.map(col => d[col] ?? '')));
+        });
+        return json({ ok: true });
+      }
 
-    const sheet = getSheet(sheetName || 'menu');
-    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+      const sheet = getSheet(sheetName || 'menu');
+      const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
 
-    if (action === 'upsert') {
-      const rows = sheet.getDataRange().getValues();
-      const keyCol = sheetName === 'config' ? headers.indexOf('key') : headers.indexOf('id');
-      const keyVal = sheetName === 'config' ? data.key : data.id;
-      const existing = rows.findIndex((r, i) => i > 0 && keyCol >= 0 && r[keyCol] === keyVal);
-      const row = headers.map(h => data[h] ?? '');
-      if (existing > 0) sheet.getRange(existing + 1, 1, 1, row.length).setValues([row]);
-      else sheet.appendRow(row);
-      return json({ ok: true });
+      if (action === 'upsert') {
+        const rows = sheet.getDataRange().getValues();
+        const keyCol = sheetName === 'config' ? headers.indexOf('key') : headers.indexOf('id');
+        const keyVal = sheetName === 'config' ? data.key : data.id;
+        const existing = rows.findIndex((r, i) => i > 0 && keyCol >= 0 && r[keyCol] === keyVal);
+        const row = headers.map(h => data[h] ?? '');
+        if (existing > 0) sheet.getRange(existing + 1, 1, 1, row.length).setValues([row]);
+        else sheet.appendRow(row);
+        return json({ ok: true });
+      }
+      if (action === 'delete') {
+        const rows = sheet.getDataRange().getValues();
+        const idCol = headers.indexOf('id');
+        const idx = rows.findIndex((r, i) => i > 0 && r[idCol] === id);
+        if (idx > 0) sheet.deleteRow(idx + 1);
+        return json({ ok: true });
+      }
+      if (action === 'sync') {
+        const lastRow = sheet.getLastRow();
+        if (lastRow > 1) sheet.deleteRows(2, lastRow - 1);
+        (data || []).forEach(d => sheet.appendRow(headers.map(h => d[h] ?? '')));
+        return json({ ok: true });
+      }
+      return json({ ok: false, error: 'Unknown action' });
+    } finally {
+      lock.releaseLock();
     }
-    if (action === 'delete') {
-      const rows = sheet.getDataRange().getValues();
-      const idCol = headers.indexOf('id');
-      const idx = rows.findIndex((r, i) => i > 0 && r[idCol] === id);
-      if (idx > 0) sheet.deleteRow(idx + 1);
-      return json({ ok: true });
-    }
-    if (action === 'sync') {
-      const lastRow = sheet.getLastRow();
-      if (lastRow > 1) sheet.deleteRows(2, lastRow - 1);
-      (data || []).forEach(d => sheet.appendRow(headers.map(h => d[h] ?? '')));
-      return json({ ok: true });
-    }
-    return json({ ok: false, error: 'Unknown action' });
   } catch (err) {
     return json({ ok: false, error: err.toString() });
   }
@@ -137,23 +149,32 @@ function secretValido(recibido) {
 // mesero/cocina ya consultan el Sheet cada 20s mientras están abiertos.
 // =====================================================================
 function liberarPedidosProgramados() {
-  const sheet = getSheet('pedidos');
-  const rows = sheet.getDataRange().getValues();
-  if (rows.length < 2) return;
-  const headers = rows[0];
-  const estadoCol = headers.indexOf('estado');
-  const liberacionCol = headers.indexOf('hora_liberacion');
-  if (estadoCol < 0 || liberacionCol < 0) return;
-  const ahora = Date.now();
-  for (let i = 1; i < rows.length; i++) {
-    const row = rows[i];
-    if (row[estadoCol] !== 'programado') continue;
-    const liberacion = row[liberacionCol];
-    if (!liberacion) continue;
-    const t = new Date(liberacion).getTime();
-    if (!isNaN(t) && t <= ahora) {
-      sheet.getRange(i + 1, estadoCol + 1).setValue('nuevo');
+  // No bloqueante: si justo ahora hay un doPost escribiendo, no vale la pena
+  // esperar aquí (esto corre en cada lectura) — se reintenta solo en la
+  // próxima consulta, unos segundos después.
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(2000)) return;
+  try {
+    const sheet = getSheet('pedidos');
+    const rows = sheet.getDataRange().getValues();
+    if (rows.length < 2) return;
+    const headers = rows[0];
+    const estadoCol = headers.indexOf('estado');
+    const liberacionCol = headers.indexOf('hora_liberacion');
+    if (estadoCol < 0 || liberacionCol < 0) return;
+    const ahora = Date.now();
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      if (row[estadoCol] !== 'programado') continue;
+      const liberacion = row[liberacionCol];
+      if (!liberacion) continue;
+      const t = new Date(liberacion).getTime();
+      if (!isNaN(t) && t <= ahora) {
+        sheet.getRange(i + 1, estadoCol + 1).setValue('nuevo');
+      }
     }
+  } finally {
+    lock.releaseLock();
   }
 }
 

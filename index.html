@@ -367,12 +367,33 @@ function sembrarMenuDemo(){
 function loadDbLocal(){
   try{ const d = localStorage.getItem('ff_db'); if(d) db = {...db, ...JSON.parse(d)}; }catch(e){}
 }
-function saveDbLocal(){ localStorage.setItem('ff_db', JSON.stringify(db)); }
+function saveDbLocal(){
+  // Con meses de operación sin nunca archivar pedidos viejos, este dispositivo
+  // puede llenar su cupo de localStorage. Sin este try/catch, ese guardado
+  // fallido se propagaba como excepción no controlada justo al cobrar,
+  // marcar un pedido o guardar el menú — tirando esa acción a medias.
+  try{ localStorage.setItem('ff_db', JSON.stringify(db)); }
+  catch(e){
+    console.error('saveDbLocal', e);
+    mostrarAvisoConexion('Este dispositivo se quedó sin espacio de almacenamiento local. Los cambios más recientes podrían no guardarse aquí — revisa la conexión con el Sheet y considera archivar pedidos viejos.');
+  }
+}
 
+// Con wifi saturado (hora pico, muchos dispositivos) un fetch sin límite de
+// tiempo puede quedarse colgado indefinidamente — antes eso dejaba el chat o
+// el refresco de pedidos "pensando" para siempre, sin avisar ni liberar la
+// pantalla. Este límite evita ese cuelgue silencioso.
+const TIMEOUT_RED_MS = 25000;
+async function fetchConLimite(url, opciones){
+  const ctrl = new AbortController();
+  const t = setTimeout(()=>ctrl.abort(), TIMEOUT_RED_MS);
+  try{ return await fetch(url, {...opciones, signal: ctrl.signal}); }
+  finally{ clearTimeout(t); }
+}
 async function apiGet(sheet){
-  if(!cfg.url) return [];
+  if(!cfg.url) return null; // sin backend conectado = "no se pudo consultar", no "está vacío" (ver nota abajo)
   try{
-    const r = await fetch(`${cfg.url}?action=get&sheet=${encodeURIComponent(sheet)}&secret=${encodeURIComponent(cfg.secret||'')}`);
+    const r = await fetchConLimite(`${cfg.url}?action=get&sheet=${encodeURIComponent(sheet)}&secret=${encodeURIComponent(cfg.secret||'')}`);
     const j = await r.json();
     // Importante: distinguimos "no hay filas" ([]) de "la llamada falló"
     // (null). Antes ambos casos regresaban [], así que un error de red
@@ -385,7 +406,7 @@ async function apiGet(sheet){
 async function apiPost(body){
   if(!cfg.url) return {ok:false, error:'Sin URL configurada'};
   try{
-    const r = await fetch(cfg.url, {method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body: JSON.stringify({...body, secret: cfg.secret||''})});
+    const r = await fetchConLimite(cfg.url, {method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body: JSON.stringify({...body, secret: cfg.secret||''})});
     return await r.json();
   }catch(e){ console.error('apiPost',e); return {ok:false, error:String(e)}; }
 }
