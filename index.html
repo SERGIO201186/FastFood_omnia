@@ -374,7 +374,7 @@ function saveDbLocal(){
   // marcar un pedido o guardar el menú — tirando esa acción a medias.
   try{ localStorage.setItem('ff_db', JSON.stringify(db)); }
   catch(e){
-    console.error('saveDbLocal', e);
+    logRemoto('error','storage_lleno',{mensaje:String(e)});
     mostrarAvisoConexion('Este dispositivo se quedó sin espacio de almacenamiento local. Los cambios más recientes podrían no guardarse aquí — revisa la conexión con el Sheet y considera archivar pedidos viejos.');
   }
 }
@@ -390,6 +390,17 @@ async function fetchConLimite(url, opciones){
   try{ return await fetch(url, {...opciones, signal: ctrl.signal}); }
   finally{ clearTimeout(t); }
 }
+// Manda avisos/errores del navegador al mismo backend que ya usa el resto de
+// la app (Code_fastfood.gs los escribe como log estructurado), para que
+// queden juntos con los del servidor en vez de perderse en la consola de
+// este dispositivo. Ojo: apiPost() NUNCA debe llamar a logRemoto en su
+// propio catch, o un backend caído generaría una llamada infinita intentando
+// reportar que no pudo llamar al backend.
+function logRemoto(nivel, evento, detalle){
+  const linea = { ts:new Date().toISOString(), nivel, evento, deviceId:deviceId(), rol:getRolDispositivo(), ...detalle };
+  (nivel==='error'?console.error:nivel==='warn'?console.warn:console.log)('[log]', linea);
+  if(cfg.url) apiPost({ action:'log', nivel, evento, detalle }).catch(()=>{});
+}
 async function apiGet(sheet){
   if(!cfg.url) return null; // sin backend conectado = "no se pudo consultar", no "está vacío" (ver nota abajo)
   try{
@@ -399,14 +410,14 @@ async function apiGet(sheet){
     // (null). Antes ambos casos regresaban [], así que un error de red
     // silencioso se veía igual que "no hay pedidos nuevos" — y la app se
     // quedaba mostrando lo último guardado en este dispositivo sin avisar.
-    if(!j || j.ok !== true || !Array.isArray(j.data)) { console.error('apiGet', sheet, 'respuesta inválida', j); return null; }
+    if(!j || j.ok !== true || !Array.isArray(j.data)) { logRemoto('error','api_get_invalido',{sheet, respuesta:j}); return null; }
     return j.data;
-  }catch(e){ console.error('apiGet',sheet,e); return null; }
+  }catch(e){ logRemoto('error','api_get_excepcion',{sheet, mensaje:String(e)}); return null; }
 }
 async function apiPost(body){
   if(!cfg.url) return {ok:false, error:'Sin URL configurada'};
   try{
-    const r = await fetchConLimite(cfg.url, {method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body: JSON.stringify({...body, secret: cfg.secret||''})});
+    const r = await fetchConLimite(cfg.url, {method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body: JSON.stringify({...body, secret: cfg.secret||'', deviceId: deviceId(), rol: getRolDispositivo()})});
     return await r.json();
   }catch(e){ console.error('apiPost',e); return {ok:false, error:String(e)}; }
 }
@@ -975,6 +986,7 @@ async function procesarTurnoChat(){
       iteraciones++;
       const res = await apiPost({ action:'chatComplete', system: construirSystemPrompt(), messages: chatHistory });
       if(!res || !res.ok){
+        logRemoto('error','chat_fallo',{mensaje: (res && res.error) || 'sin respuesta del backend'});
         chatMessages.push({ role:'assistant', kind:'text', text:'Hubo un problema de conexión con la IA' + (res && res.error ? (': '+res.error) : '') + '. Intenta de nuevo.', time:nowLabel() });
         break;
       }
@@ -1000,6 +1012,7 @@ async function procesarTurnoChat(){
     }
     if(transferido){ chatHandoff = true; chatMessages.push({ role:'assistant', kind:'text', text:'Un miembro del equipo continuará esta conversación en un momento. 🙌', time:nowLabel() }); }
   }catch(err){
+    logRemoto('error','chat_excepcion',{mensaje:String(err)});
     chatMessages.push({ role:'assistant', kind:'text', text:'Hubo un problema de conexión. Intenta de nuevo.', time:nowLabel() });
   }finally{
     chatTyping = false; renderChat();
@@ -1636,7 +1649,7 @@ if('serviceWorker' in navigator){
     if(ffSwRefrescando) return; ffSwRefrescando = true; location.reload();
   });
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./sw.js', {scope:'./'}).catch(e=>console.warn('SW no disponible:',e));
+    navigator.serviceWorker.register('./sw.js', {scope:'./'}).catch(e=>logRemoto('warn','sw_no_disponible',{mensaje:String(e)}));
   });
 }
 </script>
