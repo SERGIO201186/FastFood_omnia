@@ -17,6 +17,20 @@
 //   WHATSAPP_PHONE_ID      "Phone number ID" de tu número, en Meta for Developers
 //   WHATSAPP_VERIFY_TOKEN  cualquier palabra que inventes; la misma que pongas
 //                          en Meta al configurar la URL del webhook
+//   CHAT_RATE_LIMIT_PER_MIN  opcional, default 60. El chat web y WhatsApp son
+//                          públicos y no piden contraseña (cualquier cliente sin
+//                          cuenta debe poder usarlos) — este límite es lo único
+//                          que frena que alguien los use para vaciar tu saldo
+//                          de IA. Es un límite GLOBAL del restaurante, no por
+//                          cliente (Apps Script no expone la IP de quien llama).
+//
+// LOGS: cada evento importante (pedidos, errores, contraseña incorrecta,
+// límite de chat excedido, mensajes de WhatsApp duplicados) se escribe como
+// una línea JSON vía console.log — se ve en el editor en Ejecuciones ▸ Ver
+// registros, o en Cloud Logging si vinculas este proyecto a un proyecto
+// estándar de Google Cloud (⚙️ Configuración del proyecto). El "debug" que
+// antes se guardaba en una hoja de Sheets ahora vive ahí — ya no se acumula
+// sin límite en tu Spreadsheet.
 
 const SS_ID = SpreadsheetApp.getActiveSpreadsheet().getId();
 const ANTHROPIC_MODEL = 'claude-sonnet-5';
@@ -41,6 +55,7 @@ function doGet(e) {
     // El menú es público a propósito (lo puede leer cualquiera, sin contraseña).
     // Todo lo demás (pedidos, reservaciones, tickets, conversaciones) es privado.
     if (sheetName !== 'menu' && !secretoValido_(e.parameter.secret)) {
+      logEvento('warn', 'secreto_invalido', { via: 'doGet', sheet: sheetName });
       return json({ ok: false, error: 'No autorizado' });
     }
     const sheet = getSheet(sheetName);
@@ -60,12 +75,39 @@ function doGet(e) {
       })));
     return json({ ok: true, data });
   }
+  logEvento('warn', 'accion_desconocida', { via: 'doGet', accion: action });
   return json({ ok: false, error: 'Unknown action' });
 }
 
 function secretoValido_(secretoRecibido) {
   const secretoReal = PropertiesService.getScriptProperties().getProperty('DASHBOARD_SECRET');
   return !!secretoReal && secretoRecibido === secretoReal;
+}
+
+// =====================================================================
+// LOGS ESTRUCTURADOS — una línea JSON por evento. Ver nota al inicio del
+// archivo sobre dónde consultarlos. Nunca se le pasa contraseñas ni claves.
+// =====================================================================
+function logEvento(nivel, evento, detalle) {
+  console.log(JSON.stringify({ ts: new Date().toISOString(), nivel, evento, ...(detalle || {}) }));
+}
+
+// =====================================================================
+// LÍMITE DE EMERGENCIA para chatComplete (chat web) y los mensajes de
+// WhatsApp — ambos son públicos y sin contraseña a propósito (un cliente
+// sin cuenta debe poder usarlos), así que esto es lo único que frena que
+// alguien los use para vaciar tu saldo del proveedor de IA. Es un límite
+// GLOBAL por restaurante (no por cliente — Apps Script no expone la IP de
+// quien llama), pensado para frenar abuso evidente, no el uso normal.
+// =====================================================================
+function verificarLimiteChat_(canal) {
+  const limite = Number(PropertiesService.getScriptProperties().getProperty('CHAT_RATE_LIMIT_PER_MIN')) || 60;
+  const cache = CacheService.getScriptCache();
+  const clave = 'rl_' + canal + '_' + Math.floor(Date.now() / 60000); // ventana fija de 1 minuto
+  const actual = Number(cache.get(clave)) || 0;
+  if (actual >= limite) return false;
+  cache.put(clave, String(actual + 1), 90); // 90s de vida, más que la ventana de 1 min
+  return true;
 }
 
 function doPost(e) {
@@ -75,35 +117,80 @@ function doPost(e) {
     // Mensajes entrantes de WhatsApp: Meta manda un formato completamente
     // distinto al de nuestras propias acciones (objeto "whatsapp_business_account"
     // en vez de {action:...}). Se detecta y desvía antes que nada.
+    //
+    // OJO — límite conocido de Apps Script: doPost(e) no expone los headers
+    // de la petición, así que no hay forma de leer ni verificar la firma
+    // X-Hub-Signature-256 que manda Meta. Es decir, no podemos confirmar
+    // criptográficamente que esta llamada de verdad viene de Meta y no de
+    // alguien que arme un POST con esta misma forma. El límite de abajo
+    // (verificarLimiteChat_) al menos acota el daño si alguien lo intenta.
     if (body.object === 'whatsapp_business_account') {
+      if (!verificarLimiteChat_('whatsapp')) {
+        logEvento('warn', 'whatsapp_limite_excedido', {});
+        return json({ ok: true }); // no le damos pistas ni gastamos más en responder
+      }
+      // Nota: NO se pone un lock aquí alrededor de todo el mensaje — el
+      // ciclo de conversación puede llamar varias veces a la IA (varios
+      // segundos) y guardarConversacionWA()/appendRowSheet() ya toman su
+      // propio lock corto en cada escritura real. Un lock aquí afuera
+      // dejaría a TODOS los demás mensajes/pedidos esperando ese rato, y
+      // además se anidaría con el lock interno de esas funciones.
       handleWhatsAppIncoming(body);
       return json({ ok: true }); // Meta solo necesita un 200, no le importa el contenido
     }
 
-    const { action, sheet: sheetName, data, id } = body;
+    const { action, sheet: sheetName, data, id, deviceId, rol } = body;
+    const origen = { deviceId: deviceId || '', rol: rol || '' };
 
-    if (action === 'chatComplete') return handleChatComplete(body);
+    if (action === 'log') {
+      // Reenvío de avisos/errores del navegador (sin conexión, almacenamiento
+      // lleno, fallo del chat...) — sin exigir contraseña, porque si el
+      // problema es justo que la contraseña está mal configurada, igual
+      // queremos enterarnos.
+      logEvento(body.nivel || 'info', body.evento || 'evento_cliente', { origen: 'cliente', ...origen, ...(body.detalle || {}) });
+      return json({ ok: true });
+    }
+
+    if (action === 'chatComplete') {
+      if (!verificarLimiteChat_('web')) {
+        logEvento('warn', 'chat_limite_excedido', origen);
+        return json({ ok: false, error: 'Demasiadas solicitudes en este momento. Intenta de nuevo en un minuto.' });
+      }
+      return handleChatComplete(body);
+    }
 
     // Todo lo que sigue de aquí para abajo modifica datos del negocio —
     // requiere la contraseña del dashboard. El chat de clientes (arriba)
     // nunca la necesita.
-    if (!secretoValido_(body.secret)) return json({ ok: false, error: 'No autorizado' });
+    if (!secretoValido_(body.secret)) {
+      logEvento('warn', 'secreto_invalido', { via: 'doPost', accion: action || '' });
+      return json({ ok: false, error: 'No autorizado' });
+    }
 
     if (action === 'reactivarBot') {
+      // guardarConversacionWA ya toma su propio lock — no hace falta otro aquí.
       const conv = getConversacionWA(body.telefono);
       conv.pausado = '';
       guardarConversacionWA(body.telefono, conv);
+      logEvento('info', 'reactivarBot', { ...origen, telefono: body.telefono });
       return json({ ok: true });
     }
 
     if (action === 'sync_all') {
-      Object.keys(data || {}).forEach(sheetKey => {
-        const s = getSheet(sheetKey);
-        const h = s.getRange(1, 1, 1, s.getLastColumn()).getValues()[0];
-        const lastRow = s.getLastRow();
-        if (lastRow > 1) s.deleteRows(2, lastRow - 1);
-        (data[sheetKey] || []).forEach(d => s.appendRow(h.map(col => d[col] ?? '')));
-      });
+      const lock = LockService.getScriptLock();
+      lock.waitLock(10000);
+      try {
+        Object.keys(data || {}).forEach(sheetKey => {
+          const s = getSheet(sheetKey);
+          const h = s.getRange(1, 1, 1, s.getLastColumn()).getValues()[0];
+          const lastRow = s.getLastRow();
+          if (lastRow > 1) s.deleteRows(2, lastRow - 1);
+          (data[sheetKey] || []).forEach(d => s.appendRow(h.map(col => d[col] ?? '')));
+        });
+      } finally {
+        lock.releaseLock();
+      }
+      logEvento('info', 'sync_all', { ...origen, hojas: Object.keys(data || {}) });
       return json({ ok: true });
     }
 
@@ -111,30 +198,64 @@ function doPost(e) {
     const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
 
     if (action === 'upsert') {
-      const rows = sheet.getDataRange().getValues();
-      const keyCol = sheetName === 'config' ? headers.indexOf('key') : headers.indexOf('id');
-      const keyVal = sheetName === 'config' ? data.key : data.id;
-      const existing = rows.findIndex((r, i) => i > 0 && keyCol >= 0 && r[keyCol] === keyVal);
-      const row = headers.map(h => data[h] ?? '');
-      if (existing > 0) sheet.getRange(existing + 1, 1, 1, row.length).setValues([row]);
-      else sheet.appendRow(row);
+      // Primero LEE (para encontrar la fila a actualizar) y hasta después
+      // ESCRIBE. En hora pico, con varios meseros y WhatsApp escribiendo al
+      // mismo tiempo, dos ejecuciones podían leer el mismo estado "viejo" y
+      // pisarse la escritura una a la otra (un pedido se perdía sin ningún
+      // error visible). El lock serializa esto.
+      const lock = LockService.getScriptLock();
+      lock.waitLock(10000);
+      let existing, keyVal;
+      try {
+        const rows = sheet.getDataRange().getValues();
+        const keyCol = sheetName === 'config' ? headers.indexOf('key') : headers.indexOf('id');
+        keyVal = sheetName === 'config' ? data.key : data.id;
+        existing = rows.findIndex((r, i) => i > 0 && keyCol >= 0 && r[keyCol] === keyVal);
+        const row = headers.map(h => data[h] ?? '');
+        if (existing > 0) sheet.getRange(existing + 1, 1, 1, row.length).setValues([row]);
+        else sheet.appendRow(row);
+      } finally {
+        lock.releaseLock();
+      }
+      logEvento('info', 'upsert', {
+        ...origen, sheet: sheetName, id: keyVal, nuevo: existing <= 0,
+        mesa: data.mesa ?? undefined, referencia: data.referencia ?? undefined,
+        estado: data.estado ?? undefined, total: data.total ?? undefined,
+      });
       return json({ ok: true });
     }
     if (action === 'delete') {
-      const rows = sheet.getDataRange().getValues();
-      const idCol = headers.indexOf('id');
-      const idx = rows.findIndex((r, i) => i > 0 && r[idCol] === id);
-      if (idx > 0) sheet.deleteRow(idx + 1);
+      const lock = LockService.getScriptLock();
+      lock.waitLock(10000);
+      let idx;
+      try {
+        const rows = sheet.getDataRange().getValues();
+        const idCol = headers.indexOf('id');
+        idx = rows.findIndex((r, i) => i > 0 && r[idCol] === id);
+        if (idx > 0) sheet.deleteRow(idx + 1);
+      } finally {
+        lock.releaseLock();
+      }
+      logEvento('info', 'delete', { ...origen, sheet: sheetName, id, encontrado: idx > 0 });
       return json({ ok: true });
     }
     if (action === 'sync') {
-      const lastRow = sheet.getLastRow();
-      if (lastRow > 1) sheet.deleteRows(2, lastRow - 1);
-      (data || []).forEach(d => sheet.appendRow(headers.map(h => d[h] ?? '')));
+      const lock = LockService.getScriptLock();
+      lock.waitLock(10000);
+      try {
+        const lastRow = sheet.getLastRow();
+        if (lastRow > 1) sheet.deleteRows(2, lastRow - 1);
+        (data || []).forEach(d => sheet.appendRow(headers.map(h => d[h] ?? '')));
+      } finally {
+        lock.releaseLock();
+      }
+      logEvento('info', 'sync', { ...origen, sheet: sheetName, filas: (data || []).length });
       return json({ ok: true });
     }
+    logEvento('warn', 'accion_desconocida', { via: 'doPost', accion: action });
     return json({ ok: false, error: 'Unknown action' });
   } catch (err) {
+    logEvento('error', 'excepcion_doPost', { mensaje: err.toString() });
     return json({ ok: false, error: err.toString() });
   }
 }
@@ -149,7 +270,9 @@ function doPost(e) {
 function handleChatComplete(body) {
   const { system, messages } = body;
   if (!messages || !Array.isArray(messages)) return json({ ok: false, error: 'Falta el historial de mensajes' });
-  return json(llamarIA(system || '', messages));
+  const resultado = llamarIA(system || '', messages);
+  if (!resultado.ok) logEvento('error', 'chat_web_error', { mensaje: resultado.error });
+  return json(resultado);
 }
 
 // =====================================================================
@@ -329,6 +452,16 @@ function handleWhatsAppIncoming(body) {
   const value = change && change.value;
   const msg = value && (value.messages || [])[0];
   if (!msg) return; // era un status update (entregado/leído), no un mensaje nuevo
+
+  // Si el ciclo de la IA tarda en contestar, Meta puede reintentar el mismo
+  // webhook antes de que respondamos el 200 — sin esto, ese reintento
+  // procesaría el mismo mensaje dos veces (respuesta o pedido duplicado).
+  if (msg.id) {
+    const cache = CacheService.getScriptCache();
+    const clave = 'wa_msg_' + msg.id;
+    if (cache.get(clave)) { logEvento('info', 'whatsapp_mensaje_duplicado', { msgId: msg.id }); return; }
+    cache.put(clave, '1', 600); // 10 min cubre de sobra los reintentos de Meta
+  }
 
   const telefono = msg.from;
   let textoEntrante = '';
@@ -604,14 +737,24 @@ function getConversacionWA(telefono) {
 }
 function guardarConversacionWA(telefono, conv) {
   conv.updatedAt = new Date().toISOString();
-  const sheet = getSheet('conversaciones_wa');
-  const rows = sheet.getDataRange().getValues();
-  const headers = rows[0];
-  const telCol = headers.indexOf('telefono');
-  const idx = rows.findIndex((r, i) => i > 0 && String(r[telCol]) === String(telefono));
-  const row = headers.map(h => conv[h] ?? '');
-  if (idx > 0) sheet.getRange(idx + 1, 1, 1, row.length).setValues([row]);
-  else sheet.appendRow(row);
+  // Se llama varias veces por turno de conversación (WhatsApp no tiene
+  // "pestaña" que recuerde el estado) y desde doPost (reactivarBot) — con su
+  // propio lock aquí, no hace falta que cada quien que la llame se acuerde
+  // de tomar uno.
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const sheet = getSheet('conversaciones_wa');
+    const rows = sheet.getDataRange().getValues();
+    const headers = rows[0];
+    const telCol = headers.indexOf('telefono');
+    const idx = rows.findIndex((r, i) => i > 0 && String(r[telCol]) === String(telefono));
+    const row = headers.map(h => conv[h] ?? '');
+    if (idx > 0) sheet.getRange(idx + 1, 1, 1, row.length).setValues([row]);
+    else sheet.appendRow(row);
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 // ---- lectura/escritura genérica reutilizando el esquema ya existente ----
@@ -630,9 +773,15 @@ function leerFilas(nombreHoja) {
   })));
 }
 function appendRowSheet(nombreHoja, data) {
-  const sheet = getSheet(nombreHoja);
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  sheet.appendRow(headers.map(h => data[h] ?? ''));
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const sheet = getSheet(nombreHoja);
+    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    sheet.appendRow(headers.map(h => data[h] ?? ''));
+  } finally {
+    lock.releaseLock();
+  }
 }
 function leerConfigCliente() {
   const filas = leerFilas('config');
@@ -658,9 +807,11 @@ function llamarGraphAPI(payload) {
   debugLog('Graph API status ' + res.getResponseCode() + ': ' + res.getContentText());
 }
 
+// Antes escribía a una hoja "debug" que crecía para siempre sin nunca
+// purgarse. Ahora usa el mismo log estructurado de todo lo demás (ver
+// logEvento) — se consulta en Ejecuciones o Cloud Logging, no en el Sheet.
 function debugLog(mensaje) {
-  const sheet = getSheet('debug');
-  sheet.appendRow([new Date().toISOString(), String(mensaje)]);
+  logEvento('info', 'debug', { mensaje: String(mensaje) });
 }
 function enviarTextoWhatsApp(telefono, texto) {
   llamarGraphAPI({ messaging_product: 'whatsapp', to: normalizarTelefonoWA(telefono), type: 'text', text: { body: texto } });
@@ -721,21 +872,34 @@ function configurarDisparadoresAutomaticos() {
 // reservación futura) y los suelta a cocina ("nuevo") en cuanto llega su
 // hora_liberacion (1h antes de la reservación). Corre sola cada 15 min.
 function liberarPedidosProgramados() {
-  const sheet = getSheet('pedidos');
-  const rows = sheet.getDataRange().getValues();
-  if (rows.length < 2) return;
-  const headers = rows[0];
-  const colEstado = headers.indexOf('estado');
-  const colLiberacion = headers.indexOf('hora_liberacion');
-  const ahora = new Date();
+  // No bloqueante: esto corre cada 15 min por disparador automático: si
+  // justo ahora hay un doPost escribiendo, no vale la pena esperar — se
+  // reintenta solo en la próxima corrida.
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) { logEvento('warn', 'liberarPedidos_lock_ocupado', {}); return; }
+  try {
+    const sheet = getSheet('pedidos');
+    const rows = sheet.getDataRange().getValues();
+    if (rows.length < 2) return;
+    const headers = rows[0];
+    const colEstado = headers.indexOf('estado');
+    const colLiberacion = headers.indexOf('hora_liberacion');
+    const colId = headers.indexOf('id');
+    const ahora = new Date();
+    const liberados = [];
 
-  for (let i = 1; i < rows.length; i++) {
-    if (rows[i][colEstado] !== 'programado') continue;
-    const liberacion = rows[i][colLiberacion];
-    if (!liberacion) continue;
-    if (new Date(liberacion) <= ahora) {
-      sheet.getRange(i + 1, colEstado + 1).setValue('nuevo');
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i][colEstado] !== 'programado') continue;
+      const liberacion = rows[i][colLiberacion];
+      if (!liberacion) continue;
+      if (new Date(liberacion) <= ahora) {
+        sheet.getRange(i + 1, colEstado + 1).setValue('nuevo');
+        liberados.push(colId >= 0 ? rows[i][colId] : i + 1);
+      }
     }
+    if (liberados.length) logEvento('info', 'pedidos_liberados', { ids: liberados });
+  } finally {
+    lock.releaseLock();
   }
 }
 
@@ -744,22 +908,31 @@ function liberarPedidosProgramados() {
 // vez al día. Antes de borrar, copia todo a una hoja "reservaciones_historial"
 // por si se necesitan consultar después.
 function archivarReservacionesPasadas() {
-  const sheet = getSheet('reservaciones');
-  const rows = sheet.getDataRange().getValues();
-  if (rows.length < 2) return;
-  const headers = rows[0];
-  const colFecha = headers.indexOf('fecha');
-  const hoyStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'America/Mexico_City', 'yyyy-MM-dd');
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) { logEvento('warn', 'archivarReservaciones_lock_ocupado', {}); return; }
+  try {
+    const sheet = getSheet('reservaciones');
+    const rows = sheet.getDataRange().getValues();
+    if (rows.length < 2) return;
+    const headers = rows[0];
+    const colFecha = headers.indexOf('fecha');
+    const hoyStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'America/Mexico_City', 'yyyy-MM-dd');
 
-  const historial = getSheet('reservaciones_historial');
-  if (historial.getLastRow() === 0) historial.getRange(1, 1, 1, headers.length).setValues([headers]);
+    const historial = getSheet('reservaciones_historial');
+    if (historial.getLastRow() === 0) historial.getRange(1, 1, 1, headers.length).setValues([headers]);
 
-  // Recorre de abajo hacia arriba para poder borrar filas sin desfasar los índices.
-  for (let i = rows.length - 1; i >= 1; i--) {
-    if (String(rows[i][colFecha]) < hoyStr) {
-      historial.appendRow(rows[i]);
-      sheet.deleteRow(i + 1);
+    let archivadas = 0;
+    // Recorre de abajo hacia arriba para poder borrar filas sin desfasar los índices.
+    for (let i = rows.length - 1; i >= 1; i--) {
+      if (String(rows[i][colFecha]) < hoyStr) {
+        historial.appendRow(rows[i]);
+        sheet.deleteRow(i + 1);
+        archivadas++;
+      }
     }
+    if (archivadas) logEvento('info', 'reservaciones_archivadas', { cantidad: archivadas });
+  } finally {
+    lock.releaseLock();
   }
 }
 
