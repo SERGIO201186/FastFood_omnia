@@ -216,9 +216,9 @@ table.simple{border:1px solid var(--border);border-radius:10px;overflow:hidden;}
      encabezado/pie de página (la URL y el número de página que se veían
      abajo). Esto fija el "papel" al ancho real del rollo térmico y con
      margen 0 — con eso Chrome también deja de imprimir ese encabezado/pie,
-     porque ya no le queda espacio de margen donde ponerlo. Si tu impresora
-     usa rollo de 58mm en vez de 80mm, cambia el "80mm" de aquí abajo. */
-  @page { size: 80mm auto; margin: 0; }
+     porque ya no le queda espacio de margen donde ponerlo. Rollo de 58mm
+     (si cambias a una impresora de 80mm, ajusta el valor de aquí abajo). */
+  @page { size: 58mm auto; margin: 0; }
   body *{ visibility:hidden; }
   #ticketImprimible, #ticketImprimible *{ visibility:visible; }
   #ticketImprimible{ display:block !important; position:fixed; inset:0; background:#fff; }
@@ -288,6 +288,8 @@ table.simple{border:1px solid var(--border);border-radius:10px;overflow:hidden;}
     <div class="m-header">
       <button class="back hidden" id="meseroBack" onclick="meseroVolver()">‹</button>
       <h1 id="meseroTitulo">Mesas</h1>
+      <span id="meseroSesionBadge" class="hidden" style="color:var(--text3);font-size:11px;margin-right:6px;"></span>
+      <button id="meseroCerrarSesionBtn" class="hidden btn btn-ghost btn-sm" onclick="cerrarSesionMesero()">Cambiar</button>
       <span id="meseroCarritoBadge" class="hidden" style="background:var(--accent);color:var(--accent-ink);font-size:11px;font-weight:700;border-radius:99px;padding:5px 10px;"></span>
     </div>
     <div class="m-body" id="meseroBody"></div>
@@ -344,13 +346,14 @@ let cfg = {
   telefono_restaurante:'', link_ubicacion:'', capacidad_personas_por_turno:30,
   tiempo_preparacion_pickup_min:20, tiempo_entrega_domicilio_min:35, costo_envio:30, pin_dueno:'0000',
   logo_ticket:'', // imagen (data URL) que se imprime arriba del nombre en el ticket de cobro
+  numero_mesas:10,
 };
 function loadCfg(){
   try{ const c = localStorage.getItem('ff_cfg'); if(c) cfg = {...cfg, ...JSON.parse(c)}; }catch(e){}
 }
 function saveCfg(){ localStorage.setItem('ff_cfg', JSON.stringify(cfg)); }
 
-let db = { menu: [], pedidos: [], reservaciones: [], tickets: [] };
+let db = { menu: [], pedidos: [], reservaciones: [], tickets: [], meseros: [] };
 // Cuando TÚ cambias un pedido (marcar listo, cobrar, etc.), el guardado al
 // Sheet no se espera (para que la pantalla responda al instante). Si el
 // refresco automático de 20s cae justo en ese hueco, puede traer de vuelta
@@ -440,8 +443,8 @@ function deleteFast(sheet, id){
 }
 async function cargarTodoDesdeSheet(){
   if(!cfg.url) return;
-  const [menu, pedidos, reservaciones, tickets, configRows] = await Promise.all([
-    apiGet('menu'), apiGet('pedidos'), apiGet('reservaciones'), apiGet('tickets'), apiGet('config'),
+  const [menu, pedidos, reservaciones, tickets, meseros, configRows] = await Promise.all([
+    apiGet('menu'), apiGet('pedidos'), apiGet('reservaciones'), apiGet('tickets'), apiGet('meseros'), apiGet('config'),
   ]);
   // Cada uno puede ser: un array (incluso vacío = "de verdad no hay nada",
   // se respeta) o null (la llamada falló = se conserva lo que ya había en
@@ -451,6 +454,7 @@ async function cargarTodoDesdeSheet(){
   if(Array.isArray(pedidos)) db.pedidos = pedidos.map(normalizarPedido); else huboError = true;
   if(Array.isArray(reservaciones)) db.reservaciones = reservaciones; else huboError = true;
   if(Array.isArray(tickets)) db.tickets = tickets; else huboError = true;
+  if(Array.isArray(meseros)) db.meseros = meseros.map(normalizarMesero); else huboError = true;
   if(Array.isArray(configRows)){
     configRows.forEach(row => { if(row.key) cfg[row.key] = row.value; });
     saveCfg();
@@ -464,6 +468,11 @@ function normalizarPedido(p){
   let items = p.items;
   if(typeof items === 'string'){ try{ items = JSON.parse(items); }catch(e){ items = []; } }
   return {...p, items: items||[], total: Number(p.total)||0};
+}
+function normalizarMesero(m){
+  let mesas = m.mesas_asignadas;
+  if(typeof mesas === 'string'){ try{ mesas = mesas.trim() ? JSON.parse(mesas) : []; }catch(e){ mesas = []; } }
+  return {...m, mesas_asignadas: mesas||[]}; // vacío = puede ver/atender todas las mesas
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -1118,7 +1127,63 @@ const METODOS_PAGO = [
   { id:'transferencia', label:'📲 Transferencia' },
 ];
 let comandasEnCurso = {};
-const MESAS = Array.from({length:10},(_,i)=>i+1);
+// Quién es el mesero de este turno en este dispositivo. A propósito NO se
+// guarda en localStorage: en una tablet compartida entre varios meseros,
+// que sobreviviera a un refresco de la app podría dejar a alguien tomando
+// pedidos bajo el nombre de otro. Se vuelve a pedir en cada inicio de app.
+let meseroSesion = null; // {id, nombre}
+let meseroLoginActivo = null; // mesero que ya tocó su nombre y está tecleando su PIN
+
+function mesasDelDispositivo(){
+  const total = Array.from({length: Math.max(1, Number(cfg.numero_mesas)||10)}, (_,i)=>i+1);
+  if(!meseroSesion) return total;
+  const mesero = db.meseros.find(m=>m.id===meseroSesion.id);
+  if(!mesero || !mesero.mesas_asignadas || !mesero.mesas_asignadas.length) return total; // sin asignación = ve todas
+  return total.filter(m=>mesero.mesas_asignadas.map(String).includes(String(m)));
+}
+function viewLoginMesero(){
+  if(meseroLoginActivo){
+    return `
+      <div style="max-width:320px;margin:30px auto;text-align:center">
+        <div class="gate-ico">🔒</div>
+        <h2 style="margin-bottom:6px">${esc(meseroLoginActivo.nombre)}</h2>
+        <p style="color:var(--text3);font-size:13px;margin-bottom:16px">Ingresa tu PIN</p>
+        <div class="field" style="text-align:left"><input id="meseroPinInput" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" style="-webkit-text-security:disc;text-security:disc;text-align:center;font-size:20px;letter-spacing:6px" placeholder="••••" onkeydown="if(event.key==='Enter')intentarLoginMesero()"></div>
+        <button class="btn btn-accent btn-lg" style="width:100%" onclick="intentarLoginMesero()">Entrar →</button>
+        <button class="btn btn-ghost btn-sm" style="width:100%;margin-top:8px" onclick="meseroLoginActivo=null;renderMesero()">‹ No soy yo</button>
+        <p id="meseroLoginAviso" style="color:var(--danger);font-size:12px;margin-top:8px;display:none"></p>
+      </div>`;
+  }
+  return `
+    <div style="max-width:320px;margin:20px auto">
+      <p style="text-align:center;color:var(--text3);font-size:13px;margin-bottom:14px">Toca tu nombre para empezar tu turno</p>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        ${db.meseros.map(m=>`<button class="btn btn-ghost btn-lg" style="justify-content:flex-start" onclick='elegirMeseroLogin(${esc(JSON.stringify(m.id))})'>🧑‍🍳 ${esc(m.nombre)}</button>`).join('')}
+      </div>
+    </div>`;
+}
+function elegirMeseroLogin(id){
+  meseroLoginActivo = db.meseros.find(m=>m.id===id) || null;
+  renderMesero();
+}
+function intentarLoginMesero(){
+  const val = document.getElementById('meseroPinInput').value.trim();
+  const aviso = document.getElementById('meseroLoginAviso');
+  if(!meseroLoginActivo || !val || val !== String(meseroLoginActivo.pin||'')){
+    aviso.style.display='block'; aviso.textContent='PIN incorrecto.';
+    return;
+  }
+  meseroSesion = { id: meseroLoginActivo.id, nombre: meseroLoginActivo.nombre };
+  meseroLoginActivo = null;
+  meseroVista = 'mesas'; meseroMesaActiva = null;
+  renderMesero();
+}
+function cerrarSesionMesero(){
+  if(!confirm(`¿Cerrar turno de ${meseroSesion?meseroSesion.nombre:''}? El siguiente mesero tendrá que elegir su nombre.`)) return;
+  meseroSesion = null; meseroLoginActivo = null;
+  meseroVista = 'mesas'; meseroMesaActiva = null;
+  renderMesero();
+}
 
 function meseroVolver(){
   if(meseroVista==='platillos') meseroVista='categoria';
@@ -1157,7 +1222,7 @@ function enviarACocina(){
   // la cocina siempre ve una comanda "Nueva" cuando agregas algo, aunque la
   // mesa ya tuviera un pedido en curso.
   const id = uid('MSA');
-  const pedido = { id, origen:'mesa', mesa:meseroMesaActiva, referencia:`Mesa ${meseroMesaActiva}`, items: itemsNuevos, total, estado:'nuevo', hora:nowLabel(), fecha:new Date().toISOString(), notas: notasComandaTmp[meseroMesaActiva]||'' };
+  const pedido = { id, origen:'mesa', mesa:meseroMesaActiva, referencia:`Mesa ${meseroMesaActiva}`, items: itemsNuevos, total, estado:'nuevo', hora:nowLabel(), fecha:new Date().toISOString(), notas: notasComandaTmp[meseroMesaActiva]||'', mesero: meseroSesion?meseroSesion.nombre:'' };
   db.pedidos.push(pedido);
   marcarCambioLocal(id);
   syncFast('pedidos', {...pedido, items: JSON.stringify(itemsNuevos)});
@@ -1196,6 +1261,28 @@ function cobrarMesaConMetodo(mesa, metodo){
 
 function renderMesero(){
   const back = document.getElementById('meseroBack'), titulo = document.getElementById('meseroTitulo'), badge = document.getElementById('meseroCarritoBadge');
+  const sesionBadge = document.getElementById('meseroSesionBadge'), cerrarBtn = document.getElementById('meseroCerrarSesionBtn');
+
+  // Si el dueño ya dio de alta meseros, hay que elegir quién eres (nombre +
+  // PIN) antes de ver mesas o mandar comandas — así queda registrado qué
+  // mesero hizo cada pedido. Si todavía no hay ningún mesero configurado,
+  // no se pide nada (para no romper el flujo de quien apenas está probando
+  // la app).
+  if(db.meseros.length>0 && !meseroSesion){
+    back.classList.add('hidden'); badge.classList.add('hidden');
+    sesionBadge.classList.add('hidden'); cerrarBtn.classList.add('hidden');
+    titulo.textContent = '¿Quién eres?';
+    document.getElementById('meseroBody').innerHTML = viewLoginMesero();
+    document.getElementById('modalRoot').innerHTML = '';
+    return;
+  }
+  if(meseroSesion){
+    sesionBadge.classList.remove('hidden'); cerrarBtn.classList.remove('hidden');
+    sesionBadge.textContent = '🧑‍🍳 '+meseroSesion.nombre;
+  } else {
+    sesionBadge.classList.add('hidden'); cerrarBtn.classList.add('hidden');
+  }
+
   back.classList.toggle('hidden', meseroVista==='mesas');
   const comandaActual = comandasEnCurso[meseroMesaActiva]||[];
   titulo.textContent = meseroVista==='mesas'?'Mesas': meseroVista==='categoria'?`Mesa ${meseroMesaActiva} · Categorías`: meseroVista==='platillos'?`Mesa ${meseroMesaActiva} · ${meseroCategoriaActiva}`:`Mesa ${meseroMesaActiva} · Comanda`;
@@ -1206,10 +1293,11 @@ function renderMesero(){
   } else badge.classList.add('hidden');
 
   const body = document.getElementById('meseroBody');
+  const mesasVisibles = mesasDelDispositivo();
   if(meseroVista==='mesas'){
-    const pedidosDeMesas = db.pedidos.filter(p=>p.origen==='mesa' && p.estado!=='cobrado');
+    const pedidosDeMesas = db.pedidos.filter(p=>p.origen==='mesa' && p.estado!=='cobrado' && mesasVisibles.some(m=>String(m)===String(p.mesa)));
     body.innerHTML = `
-      <div class="mesas-grid">${MESAS.map(mesa=>{
+      <div class="mesas-grid">${mesasVisibles.map(mesa=>{
         const activosDeEstaMesa = pedidosDeMesas.filter(p=>String(p.mesa)===String(mesa));
         const p = activosDeEstaMesa[0];
         const cls = p ? (activosDeEstaMesa.every(x=>x.estado==='servido')?'servida':'ocupada') : '';
@@ -1219,7 +1307,7 @@ function renderMesero(){
       <p style="color:var(--text3);font-size:11px;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px">👨‍🍳 Comandas activas</p>
       <p style="color:var(--text4);font-size:10.5px;margin-top:-6px;margin-bottom:10px">Si una mesa ya tiene un pedido en curso, puedes agregar más platillos y se envía como una comanda nueva y separada — así la cocina siempre la ve, aunque la anterior ya esté lista.</p>
       ${pedidosDeMesas.length===0?`<p style="color:var(--text5);font-size:12px;font-style:italic">Ninguna mesa tiene pedido enviado a cocina.</p>`:
-        MESAS.filter(mesa=>pedidosDeMesas.some(p=>String(p.mesa)===String(mesa))).map(mesa=>{
+        mesasVisibles.filter(mesa=>pedidosDeMesas.some(p=>String(p.mesa)===String(mesa))).map(mesa=>{
         const pedidosMesa = pedidosDeMesas.filter(p=>String(p.mesa)===String(mesa));
         const todosServidos = pedidosMesa.every(p=>p.estado==='servido');
         const algunoListo = pedidosMesa.some(p=>p.estado==='listo');
@@ -1330,7 +1418,7 @@ function imprimirTicket(pedido){
   const fecha = new Date(pedido.fecha || Date.now());
   const metodoLbl = (METODOS_PAGO.find(m=>m.id===pedido.metodoPago)||{}).label || pedido.metodoPago || '';
   document.getElementById('ticketImprimible').innerHTML = `
-    <div style="font-family:'Courier New',monospace;width:280px;margin:0 auto;padding:8px 6px;box-sizing:border-box;color:#000">
+    <div style="font-family:'Courier New',monospace;width:100%;max-width:280px;margin:0 auto;padding:8px 6px;box-sizing:border-box;color:#000">
       <div style="text-align:center;margin-bottom:10px">
         ${cfg.logo_ticket?`<img src="${cfg.logo_ticket}" style="max-width:140px;max-height:90px;margin:0 auto 6px;display:block">`:''}
         <div style="font-weight:700;font-size:15px">${esc(cfg.nombre_restaurante||'Mi Restaurante')}</div>
@@ -1387,7 +1475,7 @@ function renderCocina(){
   }).join('');
 }
 
-let duenoAutenticado = false, duenoTab = 'menu', duenoBusqueda='', duenoFiltroCategoria='', duenoModalPlatillo=null;
+let duenoAutenticado = false, duenoTab = 'menu', duenoBusqueda='', duenoFiltroCategoria='', duenoModalPlatillo=null, duenoModalMesero=null;
 
 function renderDueno(){
   const loginWrap = document.getElementById('duenoLoginWrap'), panelWrap = document.getElementById('duenoPanelWrap');
@@ -1414,7 +1502,7 @@ function renderDueno(){
     ['Ventas totales', mxn(ventasHoy)], ['Pedidos por cobrar', pendientes], ['Reservaciones', db.reservaciones.length], ['Tickets a humano', db.tickets.length],
   ].map(([l,v])=>`<div class="stat-cell"><div class="l">${l}</div><div class="v">${v}</div></div>`).join('');
 
-  const tabs = [['menu','Menú'],['reservaciones','Reservaciones'],['pedidos','Pedidos'],['tickets',`Tickets${db.tickets.length?` (${db.tickets.length})`:''}`],['config','Configuración']];
+  const tabs = [['menu','Menú'],['reservaciones','Reservaciones'],['pedidos','Pedidos'],['tickets',`Tickets${db.tickets.length?` (${db.tickets.length})`:''}`],['meseros','Meseros'],['config','Configuración']];
   document.getElementById('duenoTabs').innerHTML = tabs.map(([id,label])=>`<button class="${duenoTab===id?'active':''}" onclick="duenoTab='${id}';renderDueno()">${label}</button>`).join('');
 
   const body = document.getElementById('duenoBody');
@@ -1422,9 +1510,10 @@ function renderDueno(){
   if(duenoTab==='reservaciones') body.innerHTML = viewTablaSimple('👥 Reservaciones', ['Fecha','Hora','Personas','Nombre','Teléfono','Registrada'], db.reservaciones.map(r=>[r.fecha,r.hora,r.personas,r.nombre_cliente,r.telefono,r.time]), 'Sin reservaciones todavía.');
   if(duenoTab==='pedidos') body.innerHTML = viewDuenoPedidos();
   if(duenoTab==='tickets') body.innerHTML = viewDuenoTickets();
+  if(duenoTab==='meseros') body.innerHTML = viewDuenoMeseros();
   if(duenoTab==='config') body.innerHTML = viewDuenoConfig();
 
-  renderModalPlatillo();
+  renderModalesDueno();
 }
 
 function intentarLoginDueno(){
@@ -1487,30 +1576,53 @@ function eliminarPlatilloDueno(id){
   deleteFast('menu', id);
   renderDueno();
 }
-function renderModalPlatillo(){
-  if(duenoModalPlatillo===null){ document.getElementById('modalRoot').innerHTML=''; return; }
-  const p = duenoModalPlatillo;
-  const html = `
-    <div class="modal-bg open"><div class="modal" style="position:relative">
-      <button class="modal-close-x" onclick="duenoModalPlatillo=null;renderDueno()">✕</button>
-      <h3>${p.id?'Editar platillo':'Nuevo platillo'}</h3>
-      <label class="img-drop" style="background:${p.imagen?'none':`linear-gradient(135deg, ${p.color||'#C7703C'}, #1F1B16)`}">
-        ${p.imagen?`<img src="${p.imagen}">`:`<span style="font-size:30px;margin-bottom:4px">${esc(p.emoji||'🍽️')}</span><span>📷 Toca para subir una foto real</span>`}
-        <input type="file" accept="image/*" class="hidden" onchange="subirImagenPlatillo(event)">
-      </label>
-      <div class="field"><label>Nombre del platillo</label><input id="mp-nombre" value="${esc(p.platillo||'')}"></div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-        <div class="field"><label>Precio (MXN)</label><input id="mp-precio" type="number" value="${p.precio||''}"></div>
-        <div class="field"><label>Categoría</label><input id="mp-categoria" value="${esc(p.categoria||'')}"></div>
-      </div>
-      <div class="field"><label>Descripción</label><textarea id="mp-desc">${esc(p.descripcion||'')}</textarea></div>
-      <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text2);margin-bottom:14px">
-        <input type="checkbox" id="mp-disp" ${p.disponible!==false?'checked':''}> Disponible en el menú
-      </label>
-      <button class="btn btn-accent btn-lg" style="width:100%" onclick="confirmarGuardarPlatillo()">${p.id?'Guardar cambios':'Agregar platillo'}</button>
-      <button class="btn" style="width:100%;color:var(--text3);margin-top:6px" onclick="duenoModalPlatillo=null;renderDueno()">Cancelar</button>
-    </div></div>`;
-  document.getElementById('modalRoot').innerHTML = html;
+function renderModalesDueno(){
+  if(duenoModalPlatillo!==null){
+    const p = duenoModalPlatillo;
+    document.getElementById('modalRoot').innerHTML = `
+      <div class="modal-bg open"><div class="modal" style="position:relative">
+        <button class="modal-close-x" onclick="duenoModalPlatillo=null;renderDueno()">✕</button>
+        <h3>${p.id?'Editar platillo':'Nuevo platillo'}</h3>
+        <label class="img-drop" style="background:${p.imagen?'none':`linear-gradient(135deg, ${p.color||'#C7703C'}, #1F1B16)`}">
+          ${p.imagen?`<img src="${p.imagen}">`:`<span style="font-size:30px;margin-bottom:4px">${esc(p.emoji||'🍽️')}</span><span>📷 Toca para subir una foto real</span>`}
+          <input type="file" accept="image/*" class="hidden" onchange="subirImagenPlatillo(event)">
+        </label>
+        <div class="field"><label>Nombre del platillo</label><input id="mp-nombre" value="${esc(p.platillo||'')}"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <div class="field"><label>Precio (MXN)</label><input id="mp-precio" type="number" value="${p.precio||''}"></div>
+          <div class="field"><label>Categoría</label><input id="mp-categoria" value="${esc(p.categoria||'')}"></div>
+        </div>
+        <div class="field"><label>Descripción</label><textarea id="mp-desc">${esc(p.descripcion||'')}</textarea></div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text2);margin-bottom:14px">
+          <input type="checkbox" id="mp-disp" ${p.disponible!==false?'checked':''}> Disponible en el menú
+        </label>
+        <button class="btn btn-accent btn-lg" style="width:100%" onclick="confirmarGuardarPlatillo()">${p.id?'Guardar cambios':'Agregar platillo'}</button>
+        <button class="btn" style="width:100%;color:var(--text3);margin-top:6px" onclick="duenoModalPlatillo=null;renderDueno()">Cancelar</button>
+      </div></div>`;
+    return;
+  }
+  if(duenoModalMesero!==null){
+    const m = duenoModalMesero;
+    const mesas = Array.from({length: Math.max(1, Number(cfg.numero_mesas)||10)}, (_,i)=>i+1);
+    const asignadas = (m.mesas_asignadas||[]).map(String);
+    document.getElementById('modalRoot').innerHTML = `
+      <div class="modal-bg open"><div class="modal" style="position:relative">
+        <button class="modal-close-x" onclick="duenoModalMesero=null;renderDueno()">✕</button>
+        <h3>${m.id?'Editar mesero':'Nuevo mesero'}</h3>
+        <div class="field"><label>Nombre</label><input id="ms-nombre" value="${esc(m.nombre||'')}"></div>
+        <div class="field"><label>PIN (4 dígitos, lo usa para entrar en Mesero)</label><input id="ms-pin" type="text" inputmode="numeric" pattern="[0-9]*" value="${esc(m.pin||'')}" placeholder="0000"></div>
+        <div class="field">
+          <label>Mesas que atiende (deja todas sin marcar = ve todas)</label>
+          <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px">
+            ${mesas.map(n=>`<label style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text2)"><input type="checkbox" class="ms-mesa-chk" value="${n}" ${asignadas.includes(String(n))?'checked':''}> ${n}</label>`).join('')}
+          </div>
+        </div>
+        <button class="btn btn-accent btn-lg" style="width:100%" onclick="confirmarGuardarMesero()">${m.id?'Guardar cambios':'Agregar mesero'}</button>
+        <button class="btn" style="width:100%;color:var(--text3);margin-top:6px" onclick="duenoModalMesero=null;renderDueno()">Cancelar</button>
+      </div></div>`;
+    return;
+  }
+  document.getElementById('modalRoot').innerHTML = '';
 }
 function subirImagenPlatillo(e){
   const archivo = e.target.files[0]; if(!archivo) return;
@@ -1549,12 +1661,59 @@ function reactivarTicket(id){
   renderDueno();
 }
 
+function viewDuenoMeseros(){
+  return `
+    <p style="font-weight:600;margin-bottom:2px">🧑‍🍳 Meseros</p>
+    <p style="color:var(--text3);font-size:12px;margin-bottom:16px">Cada uno entra a la pestaña Mesero con su nombre y PIN, así queda registrado quién mandó cada comanda. Si no agregas ninguno, la pestaña Mesero queda abierta sin pedir nada (como hasta ahora).</p>
+    <button class="btn btn-accent" style="margin-bottom:14px" onclick="duenoModalMesero={};renderDueno()">+ Agregar mesero</button>
+    ${db.meseros.length===0?`<p style="color:var(--text5);font-size:13px;font-style:italic">Sin meseros dados de alta todavía.</p>`:
+      db.meseros.map(m=>`<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:11px;display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
+        <div>
+          <div style="font-size:13px;font-weight:600">${esc(m.nombre)}</div>
+          <div style="color:var(--text3);font-size:11px;margin-top:2px">PIN ${esc(m.pin||'')} · ${(m.mesas_asignadas&&m.mesas_asignadas.length)?`Mesas: ${m.mesas_asignadas.join(', ')}`:'Ve todas las mesas'}</div>
+        </div>
+        <div style="display:flex;gap:6px">
+          <button class="btn btn-ghost btn-sm" onclick='duenoModalMesero=${esc(JSON.stringify(m))};renderDueno()'>✎ Editar</button>
+          <button class="btn btn-ghost btn-sm" onclick="eliminarMeseroDueno('${m.id}')">🗑 Eliminar</button>
+        </div>
+      </div>`).join('')}
+  `;
+}
+function guardarMeseroDueno(datos){
+  if(datos.id){
+    const idx = db.meseros.findIndex(m=>m.id===datos.id);
+    db.meseros[idx] = {...db.meseros[idx], ...datos};
+    syncFast('meseros', {...db.meseros[idx], mesas_asignadas: JSON.stringify(db.meseros[idx].mesas_asignadas)});
+  } else {
+    const nuevo = {...datos, id: uid('MES')};
+    db.meseros.push(nuevo);
+    syncFast('meseros', {...nuevo, mesas_asignadas: JSON.stringify(nuevo.mesas_asignadas)});
+  }
+  duenoModalMesero = null;
+  renderDueno();
+}
+function eliminarMeseroDueno(id){
+  if(!confirm('¿Eliminar este mesero? Ya no va a poder entrar a la pestaña Mesero con su nombre y PIN.')) return;
+  db.meseros = db.meseros.filter(m=>m.id!==id);
+  if(meseroSesion && meseroSesion.id===id) meseroSesion = null;
+  deleteFast('meseros', id);
+  renderDueno();
+}
+function confirmarGuardarMesero(){
+  const nombre = document.getElementById('ms-nombre').value.trim();
+  const pin = document.getElementById('ms-pin').value.trim();
+  if(!nombre || !pin) return;
+  const mesasElegidas = Array.from(document.querySelectorAll('.ms-mesa-chk:checked')).map(chk=>Number(chk.value));
+  guardarMeseroDueno({ id: duenoModalMesero.id||null, nombre, pin, mesas_asignadas: mesasElegidas });
+}
+
 function viewDuenoConfig(){
   const campos = [
     ['nombre_restaurante','Nombre del restaurante'],['ubicacion','Ubicación'],['horario_atencion','Horario de atención (texto que ve el cliente)'],
     ['hora_apertura','Hora de apertura (HH:MM, 24h)'],['hora_cierre','Hora de cierre (HH:MM, 24h)'],
     ['telefono_restaurante','Teléfono'],['link_ubicacion','Link de ubicación (Maps)'],['capacidad_personas_por_turno','Capacidad por turno'],
     ['tiempo_preparacion_pickup_min','Minutos para recoger'],['tiempo_entrega_domicilio_min','Minutos a domicilio'],['pin_dueno','PIN de acceso al panel'],
+    ['numero_mesas','Número de mesas del restaurante'],
   ];
   return `<div style="max-width:420px">
     <p style="font-weight:600;margin-bottom:14px">🔌 Conexión con el Sheet</p>
@@ -1616,7 +1775,7 @@ async function guardarConexion(){
   renderDueno();
 }
 function guardarConfigDueno(){
-  const campos = ['nombre_restaurante','ubicacion','horario_atencion','hora_apertura','hora_cierre','telefono_restaurante','link_ubicacion','capacidad_personas_por_turno','tiempo_preparacion_pickup_min','tiempo_entrega_domicilio_min','pin_dueno','modelo_envio','envio_distancia_gratis_km','envio_costo_extra'];
+  const campos = ['nombre_restaurante','ubicacion','horario_atencion','hora_apertura','hora_cierre','telefono_restaurante','link_ubicacion','capacidad_personas_por_turno','tiempo_preparacion_pickup_min','tiempo_entrega_domicilio_min','pin_dueno','modelo_envio','envio_distancia_gratis_km','envio_costo_extra','numero_mesas'];
   campos.forEach(key=>{
     const val = document.getElementById('cfg-'+key).value.trim();
     cfg[key] = val;

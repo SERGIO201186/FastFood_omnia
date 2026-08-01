@@ -945,10 +945,11 @@ function getSheet(name) {
     const headers = {
       config:         ['key', 'value'],
       menu:           ['id', 'platillo', 'categoria', 'precio', 'disponible', 'descripcion', 'emoji', 'color', 'imagen'],
-      pedidos:        ['id', 'origen', 'mesa', 'referencia', 'items', 'total', 'estado', 'pagado', 'hora', 'fecha', 'hora_liberacion', 'notas'],
+      pedidos:        ['id', 'origen', 'mesa', 'referencia', 'items', 'total', 'estado', 'pagado', 'hora', 'fecha', 'hora_liberacion', 'notas', 'mesero'],
       reservaciones:  ['id', 'nombre_cliente', 'telefono', 'fecha', 'hora', 'personas', 'time'],
       tickets:        ['id', 'telefono', 'motivo', 'time'],
       conversaciones_wa: ['telefono', 'historia', 'carrito', 'estado', 'pendiente_platillo', 'pendiente_precio', 'pausado', 'updatedAt'],
+      meseros:        ['id', 'nombre', 'pin', 'mesas_asignadas'],
     };
     if (headers[name]) s.getRange(1, 1, 1, headers[name].length).setValues([headers[name]]);
   }
