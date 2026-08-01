@@ -959,6 +959,7 @@ function getSheet(name) {
       tickets:        ['id', 'telefono', 'motivo', 'time'],
       conversaciones_wa: ['telefono', 'historia', 'carrito', 'estado', 'pendiente_platillo', 'pendiente_precio', 'pausado', 'updatedAt'],
       meseros:        ['id', 'nombre', 'pin', 'mesas_asignadas'],
+      solicitudes_ticket: ['id', 'mesa', 'metodoPago', 'total', 'items', 'fecha', 'atendido'],
     };
     if (headers[name]) s.getRange(1, 1, 1, headers[name].length).setValues([headers[name]]);
   }

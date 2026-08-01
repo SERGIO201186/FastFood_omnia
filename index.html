@@ -246,7 +246,8 @@ table.simple{border:1px solid var(--border);border-radius:10px;overflow:hidden;}
     <p>Se pregunta una sola vez por dispositivo. Puedes cambiarlo después desde el Panel del dueño.</p>
     <button class="btn btn-accent btn-lg" style="width:100%;margin-bottom:8px" onclick="elegirRolDispositivo('completo')">🧑‍💼 Todo (dueño / administración)</button>
     <button class="btn btn-ghost btn-lg" style="width:100%;margin-bottom:8px" onclick="elegirRolDispositivo('mesero')">🍽️ Solo Mesero</button>
-    <button class="btn btn-ghost btn-lg" style="width:100%" onclick="elegirRolDispositivo('cocina')">👨‍🍳 Solo Cocina</button>
+    <button class="btn btn-ghost btn-lg" style="width:100%;margin-bottom:8px" onclick="elegirRolDispositivo('cocina')">👨‍🍳 Solo Cocina</button>
+    <button class="btn btn-ghost btn-lg" style="width:100%" onclick="elegirRolDispositivo('caja')">💳 Solo Caja</button>
   </div>
 </div>
 
@@ -303,12 +304,20 @@ table.simple{border:1px solid var(--border);border-radius:10px;overflow:hidden;}
     <div class="kanban" id="cocinaBody"></div>
   </div>
 
+  <div id="cajaScreen" class="screen">
+    <div class="c-header">
+      <span>💳</span><h1>Caja</h1>
+      <span id="cajaCount" style="margin-left:auto;color:var(--text3);font-size:12px"></span>
+    </div>
+    <div id="cajaBody" style="padding:12px;max-width:480px;margin:0 auto;width:100%"></div>
+  </div>
+
   <div id="duenoScreen" class="screen">
     <div id="duenoLoginWrap"></div>
     <div id="duenoPanelWrap" class="hidden">
       <div class="d-header">
         <h1>Panel del dueño</h1>
-        <button class="btn btn-ghost btn-sm" onclick="if(confirm('¿Cambiar qué es este dispositivo? Se te va a pedir elegir de nuevo (Todo / Mesero / Cocina).')) cambiarRolDispositivo();">📱 Cambiar rol de este dispositivo</button>
+        <button class="btn btn-ghost btn-sm" onclick="if(confirm('¿Cambiar qué es este dispositivo? Se te va a pedir elegir de nuevo (Todo / Mesero / Cocina / Caja).')) cambiarRolDispositivo();">📱 Cambiar rol de este dispositivo</button>
         <button class="btn btn-ghost btn-sm" onclick="cerrarSesionDueno()">Cerrar sesión</button>
       </div>
       <div class="stats-grid" id="duenoStats"></div>
@@ -353,7 +362,7 @@ function loadCfg(){
 }
 function saveCfg(){ localStorage.setItem('ff_cfg', JSON.stringify(cfg)); }
 
-let db = { menu: [], pedidos: [], reservaciones: [], tickets: [], meseros: [] };
+let db = { menu: [], pedidos: [], reservaciones: [], tickets: [], meseros: [], solicitudesTicket: [] };
 // Cuando TÚ cambias un pedido (marcar listo, cobrar, etc.), el guardado al
 // Sheet no se espera (para que la pantalla responda al instante). Si el
 // refresco automático de 20s cae justo en ese hueco, puede traer de vuelta
@@ -443,8 +452,8 @@ function deleteFast(sheet, id){
 }
 async function cargarTodoDesdeSheet(){
   if(!cfg.url) return;
-  const [menu, pedidos, reservaciones, tickets, meseros, configRows] = await Promise.all([
-    apiGet('menu'), apiGet('pedidos'), apiGet('reservaciones'), apiGet('tickets'), apiGet('meseros'), apiGet('config'),
+  const [menu, pedidos, reservaciones, tickets, meseros, solicitudesTicket, configRows] = await Promise.all([
+    apiGet('menu'), apiGet('pedidos'), apiGet('reservaciones'), apiGet('tickets'), apiGet('meseros'), apiGet('solicitudes_ticket'), apiGet('config'),
   ]);
   // Cada uno puede ser: un array (incluso vacío = "de verdad no hay nada",
   // se respeta) o null (la llamada falló = se conserva lo que ya había en
@@ -455,6 +464,7 @@ async function cargarTodoDesdeSheet(){
   if(Array.isArray(reservaciones)) db.reservaciones = reservaciones; else huboError = true;
   if(Array.isArray(tickets)) db.tickets = tickets; else huboError = true;
   if(Array.isArray(meseros)) db.meseros = meseros.map(normalizarMesero); else huboError = true;
+  if(Array.isArray(solicitudesTicket)) db.solicitudesTicket = solicitudesTicket.map(normalizarSolicitudTicket); else huboError = true;
   if(Array.isArray(configRows)){
     configRows.forEach(row => { if(row.key) cfg[row.key] = row.value; });
     saveCfg();
@@ -473,6 +483,11 @@ function normalizarMesero(m){
   let mesas = m.mesas_asignadas;
   if(typeof mesas === 'string'){ try{ mesas = mesas.trim() ? JSON.parse(mesas) : []; }catch(e){ mesas = []; } }
   return {...m, mesas_asignadas: mesas||[]}; // vacío = puede ver/atender todas las mesas
+}
+function normalizarSolicitudTicket(s){
+  let items = s.items;
+  if(typeof items === 'string'){ try{ items = JSON.parse(items); }catch(e){ items = []; } }
+  return {...s, items: items||[], total: Number(s.total)||0, atendido: s.atendido===true||s.atendido==='true'||s.atendido==='TRUE'};
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -592,26 +607,28 @@ function arrancarConRol(){
   const rol = getRolDispositivo();
   renderNav();
   iniciarChat();
-  // La pantalla inicial depende del rol: cocina y mesero entran directo a su
-  // propia pantalla en vez de al chat, que ni siquiera ven en su barra.
-  const inicio = rol==='cocina' ? 'cocina' : rol==='mesero' ? 'mesero' : 'chat';
+  // La pantalla inicial depende del rol: cocina, mesero y caja entran directo
+  // a su propia pantalla en vez de al chat, que ni siquiera ven en su barra.
+  const inicio = rol==='cocina' ? 'cocina' : rol==='mesero' ? 'mesero' : rol==='caja' ? 'caja' : 'chat';
   irAPantalla(inicio);
-  setInterval(()=>{ if(pantallaActual==='cocina' || pantallaActual==='mesero') refrescarPedidosSilencioso(); }, 20000);
+  setInterval(()=>{ if(['cocina','mesero','caja'].includes(pantallaActual)) refrescarPedidosSilencioso(); }, 20000);
 }
 async function refrescarPedidosSilencioso(){
-  const pedidos = await apiGet('pedidos');
-  if(!Array.isArray(pedidos)) return; // la llamada falló: no tocar lo que ya hay en pantalla
+  const [pedidos, solicitudes] = await Promise.all([apiGet('pedidos'), apiGet('solicitudes_ticket')]);
   const ahora = Date.now();
-  const frescos = pedidos.map(normalizarPedido);
-  // Por cada pedido que tú modificaste hace poco, conserva tu versión local
-  // en vez de la que acaba de llegar del Sheet (puede estar desactualizada
-  // si tu escritura todavía no aterrizaba cuando se disparó este refresco).
-  db.pedidos = frescos.map(fresco => {
-    const tocadoHaceRato = cambiosLocalesRecientes[fresco.id] && (ahora - cambiosLocalesRecientes[fresco.id] < VENTANA_PROTECCION_MS);
-    if (!tocadoHaceRato) return fresco;
-    const local = db.pedidos.find(p => p.id === fresco.id);
-    return local || fresco;
-  });
+  if(Array.isArray(pedidos)){ // la llamada falló: no tocar lo que ya hay en pantalla
+    const frescos = pedidos.map(normalizarPedido);
+    // Por cada pedido que tú modificaste hace poco, conserva tu versión local
+    // en vez de la que acaba de llegar del Sheet (puede estar desactualizada
+    // si tu escritura todavía no aterrizaba cuando se disparó este refresco).
+    db.pedidos = frescos.map(fresco => {
+      const tocadoHaceRato = cambiosLocalesRecientes[fresco.id] && (ahora - cambiosLocalesRecientes[fresco.id] < VENTANA_PROTECCION_MS);
+      if (!tocadoHaceRato) return fresco;
+      const local = db.pedidos.find(p => p.id === fresco.id);
+      return local || fresco;
+    });
+  }
+  if(Array.isArray(solicitudes)) db.solicitudesTicket = solicitudes.map(normalizarSolicitudTicket);
   saveDbLocal(); renderPantallaActual();
 }
 
@@ -633,24 +650,28 @@ const NAV = [
   {id:'chat', ico:'💬', label:'Chat'},
   {id:'mesero', ico:'🍽️', label:'Mesero'},
   {id:'cocina', ico:'👨‍🍳', label:'Cocina'},
+  {id:'caja', ico:'💳', label:'Caja'},
   {id:'dueno', ico:'📊', label:'Dueño'},
 ];
 // Qué pestañas ve cada tipo de dispositivo. "dueno" siempre queda disponible
 // como puerta trasera protegida por PIN, para poder reconfigurar el
 // dispositivo sin tener que ir hasta la tablet del dueño.
 const NAV_POR_ROL = {
-  completo: ['chat','mesero','cocina','dueno'],
+  completo: ['chat','mesero','cocina','caja','dueno'],
   mesero:   ['mesero','dueno'],
   cocina:   ['cocina','dueno'],
+  caja:     ['caja','dueno'],
 };
 let pantallaActual = 'chat';
 function renderNav(){
   const activos = db.pedidos.filter(p=>['nuevo','preparacion','listo'].includes(p.estado)).length;
+  const ticketsPendientes = db.solicitudesTicket.filter(s=>!s.atendido).length;
   const permitidas = NAV_POR_ROL[getRolDispositivo()] || NAV_POR_ROL.completo;
   document.getElementById('bottomNav').innerHTML = NAV.filter(n=>permitidas.includes(n.id)).map(n=>`
     <button class="${pantallaActual===n.id?'active':''}" onclick="irAPantalla('${n.id}')">
       <span class="ico">${n.ico}</span><span>${n.label}</span>
       ${n.id==='cocina' && activos>0 ? `<span class="badge">${activos}</span>` : ''}
+      ${n.id==='caja' && ticketsPendientes>0 ? `<span class="badge">${ticketsPendientes}</span>` : ''}
     </button>`).join('');
 }
 function irAPantalla(id){
@@ -663,6 +684,7 @@ function irAPantalla(id){
 function renderPantallaActual(){
   if(pantallaActual==='mesero') renderMesero();
   if(pantallaActual==='cocina') renderCocina();
+  if(pantallaActual==='caja') renderCaja();
   if(pantallaActual==='dueno') renderDueno();
 }
 
@@ -1403,12 +1425,53 @@ function renderMesero(){
       <div class="modal-bg open"><div class="modal">
         <h3>✅ Cobrado — Mesa ${esc(p.mesa)}</h3>
         <p style="font-size:13px;color:var(--text2);margin-bottom:16px">Pagado con ${esc(metodoLbl)} · ${mxn(p.total)}</p>
-        <button class="btn btn-accent btn-lg" style="width:100%;margin-bottom:8px" onclick="imprimirTicket(${esc(JSON.stringify(p))})">🖨️ Imprimir ticket</button>
-        <button class="btn btn-ghost" style="width:100%" onclick="ticketParaImprimir=null;renderMesero()">Cerrar sin imprimir</button>
+        <button class="btn btn-accent btn-lg" style="width:100%;margin-bottom:8px" onclick="solicitarTicketCaja(${esc(JSON.stringify(p))})">🧾 Solicitar ticket a caja</button>
+        <button class="btn btn-ghost" style="width:100%" onclick="ticketParaImprimir=null;renderMesero()">Cerrar sin pedir ticket</button>
       </div></div>`;
   } else {
     document.getElementById('modalRoot').innerHTML='';
   }
+}
+
+// El mesero YA NO imprime desde su propio dispositivo — solo manda la
+// solicitud a la pantalla de Caja (una tablet/PC aparte, con la impresora
+// de verdad conectada). Evita que cualquiera con acceso a una tablet de
+// mesero pueda reimprimir tickets sin que caja se entere.
+function solicitarTicketCaja(pedido){
+  const solicitud = { id: uid('SOL'), mesa: pedido.mesa, metodoPago: pedido.metodoPago, total: pedido.total, items: pedido.items, fecha: pedido.fecha, atendido: false };
+  db.solicitudesTicket.push(solicitud);
+  syncFast('solicitudes_ticket', {...solicitud, items: JSON.stringify(solicitud.items), atendido: ''});
+  ticketParaImprimir = null;
+  renderMesero();
+}
+
+function renderCaja(){
+  const pendientes = db.solicitudesTicket.filter(s=>!s.atendido).sort((a,b)=>String(a.fecha||'').localeCompare(String(b.fecha||'')));
+  document.getElementById('cajaCount').textContent = pendientes.length+' pendiente(s)';
+  document.getElementById('cajaBody').innerHTML = pendientes.length===0
+    ? `<p style="color:var(--text5);font-size:13px;font-style:italic;text-align:center;margin-top:20px">Sin tickets pendientes de imprimir.</p>`
+    : pendientes.map(s=>{
+        const metodoLbl = (METODOS_PAGO.find(m=>m.id===s.metodoPago)||{}).label || s.metodoPago;
+        const hora = (()=>{ const d=new Date(s.fecha); return isNaN(d)?'':d.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'}); })();
+        return `<div class="order-card">
+          <div class="top">
+            <span class="order-tag" style="background:#C7703C30;color:#E8A33D">🪑 Mesa ${esc(s.mesa)}</span>
+            <span style="color:var(--text4);font-size:10px">🕐 ${esc(hora)}</span>
+          </div>
+          <ul>${s.items.map(it=>`<li>${it.cantidad}× ${esc(it.platillo)}</li>`).join('')}</ul>
+          <div class="bot">
+            <span class="total">${mxn(s.total)} · ${esc(metodoLbl)}</span>
+            <button class="btn btn-accent btn-sm" onclick="atenderSolicitudTicket('${s.id}')">🖨️ Imprimir</button>
+          </div>
+        </div>`;
+      }).join('');
+}
+function atenderSolicitudTicket(id){
+  const s = db.solicitudesTicket.find(x=>x.id===id); if(!s) return;
+  imprimirTicket({ id: s.id, mesa: s.mesa, origen:'mesa', fecha: s.fecha, metodoPago: s.metodoPago, items: s.items, total: s.total });
+  s.atendido = true;
+  syncFast('solicitudes_ticket', {...s, items: JSON.stringify(s.items), atendido:'true'});
+  renderCaja();
 }
 
 // Imprime un ticket de pago usando el diálogo de impresión normal del
