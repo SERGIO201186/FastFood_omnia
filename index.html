@@ -1481,9 +1481,9 @@ function imprimirTicket(pedido){
   const fecha = new Date(pedido.fecha || Date.now());
   const metodoLbl = (METODOS_PAGO.find(m=>m.id===pedido.metodoPago)||{}).label || pedido.metodoPago || '';
   document.getElementById('ticketImprimible').innerHTML = `
-    <div style="font-family:'Courier New',monospace;width:100%;max-width:280px;margin:0 auto;padding:8px 6px;box-sizing:border-box;color:#000">
+    <div style="font-family:'Courier New',monospace;width:100%;max-width:190px;margin:0 auto;padding:6px 4px;box-sizing:border-box;color:#000;overflow-wrap:break-word">
       <div style="text-align:center;margin-bottom:10px">
-        ${cfg.logo_ticket?`<img src="${cfg.logo_ticket}" style="max-width:140px;max-height:90px;margin:0 auto 6px;display:block">`:''}
+        ${cfg.logo_ticket?`<img src="${cfg.logo_ticket}" style="max-width:100px;max-height:70px;margin:0 auto 6px;display:block">`:''}
         <div style="font-weight:700;font-size:15px">${esc(cfg.nombre_restaurante||'Mi Restaurante')}</div>
         <div style="font-size:11px">${esc(cfg.ubicacion||'')}</div>
       </div>
@@ -1687,10 +1687,46 @@ function renderModalesDueno(){
   }
   document.getElementById('modalRoot').innerHTML = '';
 }
+// Google Sheets rechaza (o trunca) celdas de más de 50,000 caracteres. Una
+// foto tomada directo con el celular puede pesar varios MB en base64 — muy
+// por arriba de eso — así que se guardaba a medias o ni se guardaba, y por
+// eso la imagen no aparecía en otros dispositivos ni se imprimía en el
+// ticket. Esto la reduce a un tamaño chico (foto de menú, no necesita más
+// resolución que esa) y la comprime como JPEG antes de guardarla.
+function redimensionarImagenParaGuardar(dataUrlOriginal, maxLado, calidadInicial){
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      let w = img.width, h = img.height;
+      if(w > maxLado || h > maxLado){
+        const escala = maxLado / Math.max(w, h);
+        w = Math.round(w*escala); h = Math.round(h*escala);
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      let calidad = calidadInicial;
+      let resultado = canvas.toDataURL('image/jpeg', calidad);
+      // Si por algo sigue muy pesada (imagen muy compleja), se intenta una
+      // vez más con menos calidad antes de darse por vencido.
+      if(resultado.length > 45000){ calidad = 0.4; resultado = canvas.toDataURL('image/jpeg', calidad); }
+      if(resultado.length > 45000){ reject(new Error('La imagen sigue siendo muy pesada incluso comprimida. Prueba con otra foto más simple.')); return; }
+      resolve(resultado);
+    };
+    img.onerror = () => reject(new Error('No se pudo leer esa imagen.'));
+    img.src = dataUrlOriginal;
+  });
+}
 function subirImagenPlatillo(e){
   const archivo = e.target.files[0]; if(!archivo) return;
   const lector = new FileReader();
-  lector.onload = ev => { duenoModalPlatillo = {...duenoModalPlatillo, imagen: ev.target.result}; renderDueno(); };
+  lector.onload = async ev => {
+    try{
+      const comprimida = await redimensionarImagenParaGuardar(ev.target.result, 400, 0.75);
+      duenoModalPlatillo = {...duenoModalPlatillo, imagen: comprimida};
+      renderDueno();
+    }catch(err){ alert(err.message); }
+  };
   lector.readAsDataURL(archivo);
 }
 function confirmarGuardarPlatillo(){
@@ -1819,7 +1855,12 @@ function viewDuenoConfig(){
 function subirLogoTicket(e){
   const archivo = e.target.files[0]; if(!archivo) return;
   const lector = new FileReader();
-  lector.onload = ev => { cfg.logo_ticket = ev.target.result; renderDueno(); };
+  lector.onload = async ev => {
+    try{
+      cfg.logo_ticket = await redimensionarImagenParaGuardar(ev.target.result, 300, 0.75);
+      renderDueno();
+    }catch(err){ alert(err.message); }
+  };
   lector.readAsDataURL(archivo);
 }
 function quitarLogoTicket(){
