@@ -211,6 +211,14 @@ table.simple{border:1px solid var(--border);border-radius:10px;overflow:hidden;}
 .img-drop{display:block;aspect-ratio:4/3;border-radius:10px;border:1px dashed var(--border);display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--text5);font-size:11px;margin-bottom:12px;cursor:pointer;overflow:hidden;text-align:center;}
 .img-drop img{width:100%;height:100%;object-fit:cover;}
 @media print {
+  /* Sin esto, el navegador imprime el ticket en una hoja carta/A4 completa
+     (por eso salía kilométrico con puro blanco) y le agrega su propio
+     encabezado/pie de página (la URL y el número de página que se veían
+     abajo). Esto fija el "papel" al ancho real del rollo térmico y con
+     margen 0 — con eso Chrome también deja de imprimir ese encabezado/pie,
+     porque ya no le queda espacio de margen donde ponerlo. Si tu impresora
+     usa rollo de 58mm en vez de 80mm, cambia el "80mm" de aquí abajo. */
+  @page { size: 80mm auto; margin: 0; }
   body *{ visibility:hidden; }
   #ticketImprimible, #ticketImprimible *{ visibility:visible; }
   #ticketImprimible{ display:block !important; position:fixed; inset:0; background:#fff; }
@@ -335,6 +343,7 @@ let cfg = {
   envio_distancia_gratis_km:3, envio_costo_extra:30,
   telefono_restaurante:'', link_ubicacion:'', capacidad_personas_por_turno:30,
   tiempo_preparacion_pickup_min:20, tiempo_entrega_domicilio_min:35, costo_envio:30, pin_dueno:'0000',
+  logo_ticket:'', // imagen (data URL) que se imprime arriba del nombre en el ticket de cobro
 };
 function loadCfg(){
   try{ const c = localStorage.getItem('ff_cfg'); if(c) cfg = {...cfg, ...JSON.parse(c)}; }catch(e){}
@@ -1321,8 +1330,9 @@ function imprimirTicket(pedido){
   const fecha = new Date(pedido.fecha || Date.now());
   const metodoLbl = (METODOS_PAGO.find(m=>m.id===pedido.metodoPago)||{}).label || pedido.metodoPago || '';
   document.getElementById('ticketImprimible').innerHTML = `
-    <div style="font-family:'Courier New',monospace;width:280px;margin:0 auto;color:#000">
+    <div style="font-family:'Courier New',monospace;width:280px;margin:0 auto;padding:8px 6px;box-sizing:border-box;color:#000">
       <div style="text-align:center;margin-bottom:10px">
+        ${cfg.logo_ticket?`<img src="${cfg.logo_ticket}" style="max-width:140px;max-height:90px;margin:0 auto 6px;display:block">`:''}
         <div style="font-weight:700;font-size:15px">${esc(cfg.nombre_restaurante||'Mi Restaurante')}</div>
         <div style="font-size:11px">${esc(cfg.ubicacion||'')}</div>
       </div>
@@ -1554,6 +1564,15 @@ function viewDuenoConfig(){
     <p id="connAviso" style="font-size:12px;margin-top:8px"></p>
 
     <p style="font-weight:600;margin:20px 0 14px">⚙️ Configuración del restaurante</p>
+    <div class="field">
+      <label>Logo del ticket (opcional)</label>
+      <label class="img-drop" style="width:140px;aspect-ratio:1;margin-bottom:6px">
+        ${cfg.logo_ticket?`<img src="${cfg.logo_ticket}">`:`<span style="font-size:24px;margin-bottom:4px">🖼️</span><span>Toca para subir tu logo</span>`}
+        <input type="file" accept="image/*" class="hidden" onchange="subirLogoTicket(event)">
+      </label>
+      ${cfg.logo_ticket?`<button class="btn btn-ghost btn-sm" onclick="quitarLogoTicket()">🗑 Quitar logo</button>`:''}
+      <p style="color:var(--text4);font-size:11px;margin-top:4px">Se imprime arriba del nombre del restaurante en el ticket de cobro. Usa una imagen chica (menos de 200 KB) para que sincronice rápido.</p>
+    </div>
     ${campos.map(([key,label])=>`<div class="field"><label>${label}</label><input id="cfg-${key}" value="${esc(cfg[key]??'')}"></div>`).join('')}
 
     <p style="font-weight:600;margin:18px 0 8px">🛵 Envío a domicilio</p>
@@ -1575,6 +1594,16 @@ function viewDuenoConfig(){
     <p style="color:var(--text5);font-size:11px;font-style:italic;margin-top:10px">Cambia el horario o el envío aquí y pruébalo de inmediato en la pestaña "Chat". Ahora mismo el restaurante está marcado como <strong>${estaAbierto()?'ABIERTO':'CERRADO'}</strong> según la hora de apertura/cierre configurada.</p>
   </div>`;
 }
+function subirLogoTicket(e){
+  const archivo = e.target.files[0]; if(!archivo) return;
+  const lector = new FileReader();
+  lector.onload = ev => { cfg.logo_ticket = ev.target.result; renderDueno(); };
+  lector.readAsDataURL(archivo);
+}
+function quitarLogoTicket(){
+  cfg.logo_ticket = '';
+  renderDueno();
+}
 async function guardarConexion(){
   cfg.url = document.getElementById('cfg-conn-url').value.trim();
   cfg.secret = document.getElementById('cfg-conn-secret').value.trim();
@@ -1593,6 +1622,9 @@ function guardarConfigDueno(){
     cfg[key] = val;
     syncFast('config', {key, value: val});
   });
+  // El logo no tiene <input> de texto — ya se guardó directo en cfg al subirlo
+  // (ver subirLogoTicket/quitarLogoTicket), aquí solo falta sincronizarlo.
+  syncFast('config', {key:'logo_ticket', value: cfg.logo_ticket||''});
   saveCfg();
   document.getElementById('chatNombreRest').textContent = cfg.nombre_restaurante;
   alert('Configuración guardada ✓');
