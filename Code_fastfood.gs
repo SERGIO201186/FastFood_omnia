@@ -916,7 +916,8 @@ function archivarReservacionesPasadas() {
     if (rows.length < 2) return;
     const headers = rows[0];
     const colFecha = headers.indexOf('fecha');
-    const hoyStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'America/Mexico_City', 'yyyy-MM-dd');
+    const zona = Session.getScriptTimeZone() || 'America/Mexico_City';
+    const hoyStr = Utilities.formatDate(new Date(), zona, 'yyyy-MM-dd');
 
     const historial = getSheet('reservaciones_historial');
     if (historial.getLastRow() === 0) historial.getRange(1, 1, 1, headers.length).setValues([headers]);
@@ -924,7 +925,15 @@ function archivarReservacionesPasadas() {
     let archivadas = 0;
     // Recorre de abajo hacia arriba para poder borrar filas sin desfasar los índices.
     for (let i = rows.length - 1; i >= 1; i--) {
-      if (String(rows[i][colFecha]) < hoyStr) {
+      const valorFecha = rows[i][colFecha];
+      // Igual que en doGet/leerFilas: Sheets a veces auto-detecta "2026-07-30"
+      // como una fecha real y la guarda como objeto Date, no como texto. Antes
+      // esto se comparaba con String(valorFecha) directo, lo que en ese caso
+      // da algo como "Thu Jul 30 2026 00:00:00 GMT-0600..." — comparado como
+      // texto contra "2026-08-02" nunca sale "menor que", así que ninguna
+      // reserva pasada se archivaba jamás. Aquí se normaliza primero.
+      const fechaStr = valorFecha instanceof Date ? Utilities.formatDate(valorFecha, zona, 'yyyy-MM-dd') : String(valorFecha);
+      if (fechaStr < hoyStr) {
         historial.appendRow(rows[i]);
         sheet.deleteRow(i + 1);
         archivadas++;
