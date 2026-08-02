@@ -630,7 +630,7 @@ function ejecutarHerramientaServidor(nombre, input, telefono, conv, cfg) {
       const id = 'PED_' + Date.now();
       appendRowSheet('pedidos', {
         id, origen: 'whatsapp', mesa: '', referencia: telefono,
-        items: JSON.stringify(carrito.map(it => ({ cantidad: it.cantidad, platillo: it.platillo }))),
+        items: JSON.stringify(carrito.map(it => ({ cantidad: it.cantidad, platillo: it.platillo, precio: it.cantidad ? it.subtotal / it.cantidad : 0 }))),
         total: input.total_cuenta, estado: 'nuevo', pagado: '', hora: new Date().toLocaleTimeString('es-MX'), fecha: new Date().toISOString(),
         hora_liberacion: '', notas: '',
       });
@@ -647,7 +647,7 @@ function ejecutarHerramientaServidor(nombre, input, telefono, conv, cfg) {
       const horaLiberacion = calcularHoraLiberacion_(input.fecha_reservacion, input.hora_reservacion);
       appendRowSheet('pedidos', {
         id, origen: 'whatsapp', mesa: '', referencia: telefono,
-        items: JSON.stringify(carrito.map(it => ({ cantidad: it.cantidad, platillo: it.platillo }))),
+        items: JSON.stringify(carrito.map(it => ({ cantidad: it.cantidad, platillo: it.platillo, precio: it.cantidad ? it.subtotal / it.cantidad : 0 }))),
         total: input.total_cuenta, estado: 'programado', pagado: '', hora: new Date().toLocaleTimeString('es-MX'), fecha: new Date().toISOString(),
         hora_liberacion: horaLiberacion ? horaLiberacion.toISOString() : '',
         notas: `Para la reservación del ${input.fecha_reservacion} ${input.hora_reservacion}`,
@@ -959,7 +959,7 @@ function getSheet(name) {
       tickets:        ['id', 'telefono', 'motivo', 'time'],
       conversaciones_wa: ['telefono', 'historia', 'carrito', 'estado', 'pendiente_platillo', 'pendiente_precio', 'pausado', 'updatedAt'],
       meseros:        ['id', 'nombre', 'pin', 'mesas_asignadas'],
-      solicitudes_ticket: ['id', 'mesa', 'metodoPago', 'total', 'items', 'fecha', 'atendido'],
+      solicitudes_ticket: ['id', 'mesa', 'metodoPago', 'total', 'items', 'fecha', 'atendido', 'pedidoIds'],
       egresos:        ['id', 'concepto', 'monto', 'fecha', 'categoria', 'proveedor', 'metodoPago'],
     };
     if (headers[name]) s.getRange(1, 1, 1, headers[name].length).setValues([headers[name]]);
