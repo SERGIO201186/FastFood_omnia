@@ -268,6 +268,8 @@ table.simple tbody td{padding:8px 10px;border-top:1px solid var(--border);color:
   </div>
 </div>
 
+<div id="avisosGlobales" style="position:fixed;top:0;left:0;right:0;z-index:890;display:flex;flex-direction:column;"></div>
+
 <div id="appView">
   <div id="chatScreen" class="screen active">
     <div class="chat-header">
@@ -445,13 +447,54 @@ async function apiPost(body){
     return await r.json();
   }catch(e){ console.error('apiPost',e); return {ok:false, error:String(e)}; }
 }
+// Cola de escrituras pendientes hacia el Sheet, guardada en localStorage
+// para que sobreviva a que se cierre la app o se apague el dispositivo.
+// Antes, syncFast/deleteFast mandaban el POST "al aire" (fire-and-forget):
+// si no había conexión, ese cambio se perdía para siempre y nunca se
+// reintentaba, aunque la app "seguía funcionando" localmente y daba a
+// entender que sí se había guardado. Ahora cada escritura que falla queda
+// en esta cola y se reintenta sola hasta que el Sheet la confirme.
+let colaSync = [];
+function loadColaSync(){ try{ const c = localStorage.getItem('ff_cola_sync'); if(c) colaSync = JSON.parse(c)||[]; }catch(e){ colaSync = []; } }
+function saveColaSync(){ try{ localStorage.setItem('ff_cola_sync', JSON.stringify(colaSync)); }catch(e){} }
+function tieneSyncPendiente(sheet, id){
+  return colaSync.some(op => op.sheet===sheet && (op.tipo==='delete' ? String(op.id)===String(id) : op.data && String(op.data.id)===String(id)));
+}
+function encolarSync(op){
+  colaSync.push(op);
+  saveColaSync();
+  actualizarBadgeSync();
+  procesarColaSync();
+}
+let procesandoColaSync = false;
+async function procesarColaSync(){
+  if(procesandoColaSync || !cfg.url || !colaSync.length) return;
+  procesandoColaSync = true;
+  try{
+    while(colaSync.length){
+      const op = colaSync[0];
+      const body = op.tipo==='delete' ? {action:'delete', sheet:op.sheet, id:op.id} : {action:'upsert', sheet:op.sheet, data:op.data};
+      const r = await apiPost(body);
+      if(!r || r.ok !== true){
+        logRemoto('warn','sync_pendiente_reintentara',{sheet:op.sheet, tipo:op.tipo, respuesta:r});
+        break; // sin conexión (o el servidor lo rechazó): se detiene sin perder el orden, se reintenta en el próximo intento
+      }
+      colaSync.shift();
+      saveColaSync();
+    }
+  } finally {
+    procesandoColaSync = false;
+    actualizarBadgeSync();
+  }
+}
+window.addEventListener('online', procesarColaSync);
 function syncFast(sheet, data){
   saveDbLocal();
-  if(cfg.url) apiPost({action:'upsert', sheet, data}).catch(()=>{});
+  if(cfg.url) encolarSync({tipo:'upsert', sheet, data});
 }
 function deleteFast(sheet, id){
   saveDbLocal();
-  if(cfg.url) apiPost({action:'delete', sheet, id}).catch(()=>{});
+  if(cfg.url) encolarSync({tipo:'delete', sheet, id});
 }
 async function cargarTodoDesdeSheet(){
   if(!cfg.url) return;
@@ -498,7 +541,7 @@ function normalizarSolicitudTicket(s){
 function normalizarEgreso(e){ return {...e, monto: Number(e.monto)||0}; }
 
 document.addEventListener('DOMContentLoaded', () => {
-  loadCfg(); loadDbLocal();
+  loadCfg(); loadDbLocal(); loadColaSync(); actualizarBadgeSync();
   // Esta pantalla nunca traía la clase "hidden" desde el HTML, así que se
   // veía apenas cargaba la página sin que ninguna condición la controlara.
   // La ocultamos aquí explícitamente y solo se muestra cuando de verdad hace falta.
@@ -591,6 +634,7 @@ async function verificarClaveGate(){
 async function arrancarAppReal(){
   const ok = await cargarTodoDesdeSheet();
   if(ok === false) mostrarAvisoConexion('No se pudo conectar con el Sheet del restaurante. Se están mostrando los últimos datos guardados en este dispositivo — puede que falten pedidos recientes de otros dispositivos.');
+  procesarColaSync(); // por si quedaron cambios sin mandar de una sesión offline anterior
   document.getElementById('chatNombreRest').textContent = cfg.nombre_restaurante || 'Mi Restaurante';
   if(!getRolDispositivo()){
     document.getElementById('rolView').classList.remove('hidden');
@@ -603,11 +647,27 @@ function mostrarAvisoConexion(texto){
   if(!el){
     el = document.createElement('div');
     el.id = 'avisoConexionGlobal';
-    el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:900;background:#B23A2E;color:#fff;font-size:12px;padding:8px 14px;text-align:center;';
-    document.body.appendChild(el);
+    el.style.cssText = 'background:#B23A2E;color:#fff;font-size:12px;padding:8px 14px;text-align:center;';
+    document.getElementById('avisosGlobales').appendChild(el);
   }
   el.textContent = '⚠️ ' + texto;
   el.onclick = () => { el.remove(); };
+}
+// Mientras haya operaciones (pedidos, cobros, cambios de menú, etc.) que
+// todavía no llegaron al Sheet porque el dispositivo estaba sin conexión,
+// se lo avisamos a quien esté usándolo — para que sepa que sigue trabajando
+// bien "sin internet" y que eso se va a sincronizar solo en cuanto regrese
+// la señal, en vez de asumir que su cambio ya quedó guardado en el Sheet.
+function actualizarBadgeSync(){
+  let el = document.getElementById('syncPendienteBanner');
+  if(colaSync.length===0){ if(el) el.remove(); return; }
+  if(!el){
+    el = document.createElement('div');
+    el.id = 'syncPendienteBanner';
+    el.style.cssText = 'background:#3A2E18;color:var(--accent);font-size:12px;padding:7px 14px;text-align:center;';
+    document.getElementById('avisosGlobales').appendChild(el);
+  }
+  el.textContent = `🔄 ${colaSync.length} cambio${colaSync.length===1?'':'s'} sin sincronizar — se guardan en este dispositivo y se mandan solos en cuanto regrese la conexión.`;
 }
 function arrancarConRol(){
   document.getElementById('appView').classList.add('show');
@@ -635,23 +695,31 @@ function programarRefrescoPedidos(){
     programarRefrescoPedidos();
   }, espera);
 }
+// Fusiona lo que acaba de llegar del Sheet con lo que hay en este
+// dispositivo, sin perder cambios que siguen esperando en colaSync (por
+// ejemplo, un pedido creado sin conexión, que el Sheet todavía ni conoce).
+// Antes esto solo recorría la lista fresca del servidor (frescos.map(...)),
+// así que un pedido creado offline —que por definición no está en esa
+// lista— desaparecía de la pantalla en el siguiente refresco aunque
+// siguiera esperando su turno para sincronizarse.
+function fusionarConPendientes(sheet, frescos, localActual){
+  const idsFrescos = new Set(frescos.map(f=>f.id));
+  const ahora = Date.now();
+  const fusionados = frescos.map(fresco => {
+    const tocadoHaceRato = cambiosLocalesRecientes[fresco.id] && (ahora - cambiosLocalesRecientes[fresco.id] < VENTANA_PROTECCION_MS);
+    if (!tocadoHaceRato && !tieneSyncPendiente(sheet, fresco.id)) return fresco;
+    const local = localActual.find(p => p.id === fresco.id);
+    return local || fresco;
+  });
+  const nuevosSinSincronizar = localActual.filter(p => !idsFrescos.has(p.id) && tieneSyncPendiente(sheet, p.id));
+  return [...fusionados, ...nuevosSinSincronizar];
+}
 async function refrescarPedidosSilencioso(){
+  procesarColaSync(); // aprovecha cada ciclo para reintentar lo que siga sin sincronizar
   const [pedidos, solicitudes] = await Promise.all([apiGet('pedidos'), apiGet('solicitudes_ticket')]);
   refrescoPedidosFallosSeguidos = (pedidos===null && solicitudes===null) ? refrescoPedidosFallosSeguidos+1 : 0;
-  const ahora = Date.now();
-  if(Array.isArray(pedidos)){ // la llamada falló: no tocar lo que ya hay en pantalla
-    const frescos = pedidos.map(normalizarPedido);
-    // Por cada pedido que tú modificaste hace poco, conserva tu versión local
-    // en vez de la que acaba de llegar del Sheet (puede estar desactualizada
-    // si tu escritura todavía no aterrizaba cuando se disparó este refresco).
-    db.pedidos = frescos.map(fresco => {
-      const tocadoHaceRato = cambiosLocalesRecientes[fresco.id] && (ahora - cambiosLocalesRecientes[fresco.id] < VENTANA_PROTECCION_MS);
-      if (!tocadoHaceRato) return fresco;
-      const local = db.pedidos.find(p => p.id === fresco.id);
-      return local || fresco;
-    });
-  }
-  if(Array.isArray(solicitudes)) db.solicitudesTicket = solicitudes.map(normalizarSolicitudTicket);
+  if(Array.isArray(pedidos)) db.pedidos = fusionarConPendientes('pedidos', pedidos.map(normalizarPedido), db.pedidos);
+  if(Array.isArray(solicitudes)) db.solicitudesTicket = fusionarConPendientes('solicitudes_ticket', solicitudes.map(normalizarSolicitudTicket), db.solicitudesTicket);
   saveDbLocal(); renderPantallaActual();
 }
 
