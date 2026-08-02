@@ -615,10 +615,26 @@ function arrancarConRol(){
   // a su propia pantalla en vez de al chat, que ni siquiera ven en su barra.
   const inicio = rol==='cocina' ? 'cocina' : rol==='mesero' ? 'mesero' : rol==='caja' ? 'caja' : 'chat';
   irAPantalla(inicio);
-  setInterval(()=>{ if(['cocina','mesero','caja'].includes(pantallaActual)) refrescarPedidosSilencioso(); }, 10000);
+  programarRefrescoPedidos();
+}
+const REFRESCO_PEDIDOS_MS = 10000;
+const REFRESCO_PEDIDOS_MAX_MS = 60000; // tope del backoff cuando el backend está fallando o sin cuota
+let refrescoPedidosFallosSeguidos = 0;
+// Antes esto era un setInterval fijo de 10s: si el backend empezaba a fallar
+// (Apps Script sin cuota, deployment caído, etc.) la app insistía cada 10s
+// sin parar, empeorando la saturación. Ahora, cada fallo alarga la siguiente
+// espera (10s, 20s, 40s... hasta 60s tope) y un refresco exitoso la regresa
+// a 10s de inmediato.
+function programarRefrescoPedidos(){
+  const espera = Math.min(REFRESCO_PEDIDOS_MS * Math.pow(2, refrescoPedidosFallosSeguidos), REFRESCO_PEDIDOS_MAX_MS);
+  setTimeout(async ()=>{
+    if(['cocina','mesero','caja'].includes(pantallaActual)) await refrescarPedidosSilencioso();
+    programarRefrescoPedidos();
+  }, espera);
 }
 async function refrescarPedidosSilencioso(){
   const [pedidos, solicitudes] = await Promise.all([apiGet('pedidos'), apiGet('solicitudes_ticket')]);
+  refrescoPedidosFallosSeguidos = (pedidos===null && solicitudes===null) ? refrescoPedidosFallosSeguidos+1 : 0;
   const ahora = Date.now();
   if(Array.isArray(pedidos)){ // la llamada falló: no tocar lo que ya hay en pantalla
     const frescos = pedidos.map(normalizarPedido);
