@@ -362,7 +362,7 @@ function loadCfg(){
 }
 function saveCfg(){ localStorage.setItem('ff_cfg', JSON.stringify(cfg)); }
 
-let db = { menu: [], pedidos: [], reservaciones: [], tickets: [], meseros: [], solicitudesTicket: [] };
+let db = { menu: [], pedidos: [], reservaciones: [], tickets: [], meseros: [], solicitudesTicket: [], egresos: [] };
 // Cuando TÚ cambias un pedido (marcar listo, cobrar, etc.), el guardado al
 // Sheet no se espera (para que la pantalla responda al instante). Si el
 // refresco automático de 20s cae justo en ese hueco, puede traer de vuelta
@@ -452,8 +452,8 @@ function deleteFast(sheet, id){
 }
 async function cargarTodoDesdeSheet(){
   if(!cfg.url) return;
-  const [menu, pedidos, reservaciones, tickets, meseros, solicitudesTicket, configRows] = await Promise.all([
-    apiGet('menu'), apiGet('pedidos'), apiGet('reservaciones'), apiGet('tickets'), apiGet('meseros'), apiGet('solicitudes_ticket'), apiGet('config'),
+  const [menu, pedidos, reservaciones, tickets, meseros, solicitudesTicket, egresos, configRows] = await Promise.all([
+    apiGet('menu'), apiGet('pedidos'), apiGet('reservaciones'), apiGet('tickets'), apiGet('meseros'), apiGet('solicitudes_ticket'), apiGet('egresos'), apiGet('config'),
   ]);
   // Cada uno puede ser: un array (incluso vacío = "de verdad no hay nada",
   // se respeta) o null (la llamada falló = se conserva lo que ya había en
@@ -465,6 +465,7 @@ async function cargarTodoDesdeSheet(){
   if(Array.isArray(tickets)) db.tickets = tickets; else huboError = true;
   if(Array.isArray(meseros)) db.meseros = meseros.map(normalizarMesero); else huboError = true;
   if(Array.isArray(solicitudesTicket)) db.solicitudesTicket = solicitudesTicket.map(normalizarSolicitudTicket); else huboError = true;
+  if(Array.isArray(egresos)) db.egresos = egresos.map(normalizarEgreso); else huboError = true;
   if(Array.isArray(configRows)){
     configRows.forEach(row => { if(row.key) cfg[row.key] = row.value; });
     saveCfg();
@@ -489,6 +490,7 @@ function normalizarSolicitudTicket(s){
   if(typeof items === 'string'){ try{ items = JSON.parse(items); }catch(e){ items = []; } }
   return {...s, items: items||[], total: Number(s.total)||0, atendido: s.atendido===true||s.atendido==='true'||s.atendido==='TRUE'};
 }
+function normalizarEgreso(e){ return {...e, monto: Number(e.monto)||0}; }
 
 document.addEventListener('DOMContentLoaded', () => {
   loadCfg(); loadDbLocal();
@@ -1538,7 +1540,26 @@ function renderCocina(){
   }).join('');
 }
 
-let duenoAutenticado = false, duenoTab = 'menu', duenoBusqueda='', duenoFiltroCategoria='', duenoModalPlatillo=null, duenoModalMesero=null;
+let duenoAutenticado = false, duenoTab = 'dashboard', duenoBusqueda='', duenoFiltroCategoria='', duenoModalPlatillo=null, duenoModalMesero=null, duenoModalEgreso=null, duenoPeriodo='hoy';
+const CATEGORIAS_EGRESO = ['Insumos','Renta','Nómina','Servicios','Otro'];
+function fechaLocalYMD(d){ const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), day=String(d.getDate()).padStart(2,'0'); return `${y}-${m}-${day}`; }
+// Normaliza tanto un ISO completo (pedidos) como "YYYY-MM-DD" (egresos) a
+// "YYYY-MM-DD" en hora local, para poder comparar fechas de origen distinto
+// sin líos de zona horaria (mismo criterio que ya usa archivarReservacionesPasadas).
+function fechaDelRegistro(fecha){
+  if(!fecha) return '';
+  const d = new Date(fecha);
+  return isNaN(d) ? String(fecha).slice(0,10) : fechaLocalYMD(d);
+}
+function dentroDePeriodo(fecha, periodo){
+  if(periodo==='todo') return true;
+  const hoy = new Date();
+  const fechaStr = fechaDelRegistro(fecha);
+  if(periodo==='hoy') return fechaStr === fechaLocalYMD(hoy);
+  if(periodo==='semana'){ const inicio=new Date(hoy); inicio.setDate(hoy.getDate()-6); return fechaStr>=fechaLocalYMD(inicio) && fechaStr<=fechaLocalYMD(hoy); }
+  if(periodo==='mes'){ const inicio=new Date(hoy.getFullYear(), hoy.getMonth(), 1); return fechaStr>=fechaLocalYMD(inicio) && fechaStr<=fechaLocalYMD(hoy); }
+  return true;
+}
 
 function renderDueno(){
   const loginWrap = document.getElementById('duenoLoginWrap'), panelWrap = document.getElementById('duenoPanelWrap');
@@ -1565,13 +1586,15 @@ function renderDueno(){
     ['Ventas totales', mxn(ventasHoy)], ['Pedidos por cobrar', pendientes], ['Reservaciones', db.reservaciones.length], ['Tickets a humano', db.tickets.length],
   ].map(([l,v])=>`<div class="stat-cell"><div class="l">${l}</div><div class="v">${v}</div></div>`).join('');
 
-  const tabs = [['menu','Menú'],['reservaciones','Reservaciones'],['pedidos','Pedidos'],['tickets',`Tickets${db.tickets.length?` (${db.tickets.length})`:''}`],['meseros','Meseros'],['config','Configuración']];
+  const tabs = [['dashboard','📊 Dashboard'],['menu','Menú'],['reservaciones','Reservaciones'],['pedidos','Pedidos'],['egresos','Egresos'],['tickets',`Tickets${db.tickets.length?` (${db.tickets.length})`:''}`],['meseros','Meseros'],['config','Configuración']];
   document.getElementById('duenoTabs').innerHTML = tabs.map(([id,label])=>`<button class="${duenoTab===id?'active':''}" onclick="duenoTab='${id}';renderDueno()">${label}</button>`).join('');
 
   const body = document.getElementById('duenoBody');
+  if(duenoTab==='dashboard') body.innerHTML = viewDuenoDashboard();
   if(duenoTab==='menu') body.innerHTML = viewDuenoMenu();
   if(duenoTab==='reservaciones') body.innerHTML = viewTablaSimple('👥 Reservaciones', ['Fecha','Hora','Personas','Nombre','Teléfono','Registrada'], db.reservaciones.map(r=>[r.fecha,r.hora,r.personas,r.nombre_cliente,r.telefono,r.time]), 'Sin reservaciones todavía.');
   if(duenoTab==='pedidos') body.innerHTML = viewDuenoPedidos();
+  if(duenoTab==='egresos') body.innerHTML = viewDuenoEgresos();
   if(duenoTab==='tickets') body.innerHTML = viewDuenoTickets();
   if(duenoTab==='meseros') body.innerHTML = viewDuenoMeseros();
   if(duenoTab==='config') body.innerHTML = viewDuenoConfig();
@@ -1685,6 +1708,29 @@ function renderModalesDueno(){
       </div></div>`;
     return;
   }
+  if(duenoModalEgreso!==null){
+    const e = duenoModalEgreso;
+    document.getElementById('modalRoot').innerHTML = `
+      <div class="modal-bg open"><div class="modal" style="position:relative">
+        <button class="modal-close-x" onclick="duenoModalEgreso=null;renderDueno()">✕</button>
+        <h3>${e.id?'Editar gasto':'Nuevo gasto'}</h3>
+        <div class="field"><label>Concepto</label><input id="eg-concepto" value="${esc(e.concepto||'')}" placeholder="Ej. Compra de carne"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <div class="field"><label>Monto (MXN)</label><input id="eg-monto" type="number" value="${e.monto||''}"></div>
+          <div class="field"><label>Fecha</label><input id="eg-fecha" type="date" value="${esc(e.fecha||fechaLocalYMD(new Date()))}"></div>
+        </div>
+        <div class="field"><label>Categoría</label>
+          <select id="eg-categoria">${CATEGORIAS_EGRESO.map(c=>`<option value="${c}" ${e.categoria===c?'selected':''}>${c}</option>`).join('')}</select>
+        </div>
+        <div class="field"><label>Proveedor (opcional)</label><input id="eg-proveedor" value="${esc(e.proveedor||'')}"></div>
+        <div class="field"><label>Método de pago</label>
+          <select id="eg-metodo">${METODOS_PAGO.map(m=>`<option value="${m.id}" ${e.metodoPago===m.id?'selected':''}>${m.label}</option>`).join('')}</select>
+        </div>
+        <button class="btn btn-accent btn-lg" style="width:100%" onclick="confirmarGuardarEgreso()">${e.id?'Guardar cambios':'Agregar gasto'}</button>
+        <button class="btn" style="width:100%;color:var(--text3);margin-top:6px" onclick="duenoModalEgreso=null;renderDueno()">Cancelar</button>
+      </div></div>`;
+    return;
+  }
   document.getElementById('modalRoot').innerHTML = '';
 }
 // Google Sheets rechaza (o trunca) celdas de más de 50,000 caracteres. Una
@@ -1758,6 +1804,98 @@ function reactivarTicket(id){
   db.tickets = db.tickets.filter(t=>t.id!==id);
   deleteFast('tickets', id);
   renderDueno();
+}
+
+function viewDuenoDashboard(){
+  const pedidosPeriodo = db.pedidos.filter(p=>dentroDePeriodo(p.fecha, duenoPeriodo));
+  const egresosPeriodo = db.egresos.filter(e=>dentroDePeriodo(e.fecha, duenoPeriodo));
+  const ingresos = pedidosPeriodo.reduce((a,p)=>a+p.total,0);
+  const totalEgresos = egresosPeriodo.reduce((a,e)=>a+Number(e.monto||0),0);
+  const balance = ingresos - totalEgresos;
+
+  const conteo = {};
+  pedidosPeriodo.forEach(p=>(p.items||[]).forEach(it=>{ conteo[it.platillo] = (conteo[it.platillo]||0) + Number(it.cantidad||0); }));
+  const top = Object.entries(conteo).sort((a,b)=>b[1]-a[1]).slice(0,8);
+  const maxTop = top.length ? top[0][1] : 1;
+
+  const porCategoria = {};
+  egresosPeriodo.forEach(e=>{ const cat = e.categoria||'Otro'; porCategoria[cat] = (porCategoria[cat]||0) + Number(e.monto||0); });
+
+  const PERIODOS = [['hoy','Hoy'],['semana','7 días'],['mes','Este mes'],['todo','Todo']];
+
+  return `
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px">
+      ${PERIODOS.map(([id,label])=>`<button class="btn ${duenoPeriodo===id?'btn-accent':'btn-ghost'} btn-sm" onclick="duenoPeriodo='${id}';renderDueno()">${label}</button>`).join('')}
+    </div>
+    <div class="stats-grid" style="margin-bottom:22px;border-radius:10px;overflow:hidden">
+      <div class="stat-cell"><div class="l">Ingresos</div><div class="v" style="color:var(--success)">${mxn(ingresos)}</div></div>
+      <div class="stat-cell"><div class="l">Egresos</div><div class="v" style="color:var(--danger)">${mxn(totalEgresos)}</div></div>
+      <div class="stat-cell"><div class="l">Balance</div><div class="v" style="color:${balance>=0?'var(--success)':'var(--danger)'}">${mxn(balance)}</div></div>
+      <div class="stat-cell"><div class="l">Pedidos</div><div class="v">${pedidosPeriodo.length}</div></div>
+    </div>
+
+    <p style="font-weight:600;margin-bottom:10px">🏆 Platillos más vendidos</p>
+    ${top.length===0 ? `<p style="color:var(--text5);font-size:13px;font-style:italic;margin-bottom:20px">Sin ventas en este periodo.</p>` :
+      `<div style="margin-bottom:22px">${top.map(([nombre,cant])=>`
+        <div style="margin-bottom:9px">
+          <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text2);margin-bottom:3px"><span>${esc(nombre)}</span><span>${cant}</span></div>
+          <div style="background:var(--panel2);border-radius:99px;height:6px;overflow:hidden"><div style="background:var(--accent);height:100%;width:${Math.max(4,cant/maxTop*100)}%"></div></div>
+        </div>`).join('')}</div>`}
+
+    <p style="font-weight:600;margin-bottom:10px">💸 Egresos por categoría</p>
+    ${Object.keys(porCategoria).length===0 ? `<p style="color:var(--text5);font-size:13px;font-style:italic">Sin egresos registrados en este periodo.</p>` :
+      `<table class="simple"><thead><tr><th>Categoría</th><th>Total</th></tr></thead><tbody>
+        ${Object.entries(porCategoria).sort((a,b)=>b[1]-a[1]).map(([cat,monto])=>`<tr><td>${esc(cat)}</td><td>${mxn(monto)}</td></tr>`).join('')}
+      </tbody></table>`}
+  `;
+}
+
+function viewDuenoEgresos(){
+  const ordenados = [...db.egresos].sort((a,b)=>String(b.fecha||'').localeCompare(String(a.fecha||'')));
+  return `
+    <p style="font-weight:600;margin-bottom:2px">💸 Egresos</p>
+    <p style="color:var(--text3);font-size:12px;margin-bottom:16px">Gastos del restaurante — insumos, renta, nómina, servicios, etc.</p>
+    <button class="btn btn-accent" style="margin-bottom:14px" onclick="duenoModalEgreso={};renderDueno()">+ Agregar gasto</button>
+    ${ordenados.length===0?`<p style="color:var(--text5);font-size:13px;font-style:italic">Sin egresos registrados.</p>`:
+      `<table class="simple"><thead><tr><th>Fecha</th><th>Concepto</th><th>Categoría</th><th>Proveedor</th><th>Monto</th><th></th></tr></thead><tbody>
+        ${ordenados.map(e=>`<tr>
+          <td>${esc(e.fecha)}</td><td>${esc(e.concepto)}</td><td>${esc(e.categoria)}</td><td>${esc(e.proveedor||'—')}</td><td>${mxn(e.monto)}</td>
+          <td style="white-space:nowrap"><button class="btn btn-ghost btn-sm" onclick='duenoModalEgreso=${esc(JSON.stringify(e))};renderDueno()'>✎</button> <button class="btn btn-ghost btn-sm" onclick="eliminarEgresoDueno('${e.id}')">🗑</button></td>
+        </tr>`).join('')}
+      </tbody></table>`}
+  `;
+}
+function guardarEgresoDueno(datos){
+  if(datos.id){
+    const idx = db.egresos.findIndex(e=>e.id===datos.id);
+    db.egresos[idx] = {...db.egresos[idx], ...datos};
+    syncFast('egresos', db.egresos[idx]);
+  } else {
+    const nuevo = {...datos, id: uid('EGR')};
+    db.egresos.unshift(nuevo);
+    syncFast('egresos', nuevo);
+  }
+  duenoModalEgreso = null;
+  renderDueno();
+}
+function eliminarEgresoDueno(id){
+  if(!confirm('¿Eliminar este egreso?')) return;
+  db.egresos = db.egresos.filter(e=>e.id!==id);
+  deleteFast('egresos', id);
+  renderDueno();
+}
+function confirmarGuardarEgreso(){
+  const concepto = document.getElementById('eg-concepto').value.trim();
+  const monto = Number(document.getElementById('eg-monto').value)||0;
+  if(!concepto || !monto) return;
+  guardarEgresoDueno({
+    id: duenoModalEgreso.id||null,
+    concepto, monto,
+    fecha: document.getElementById('eg-fecha').value || fechaLocalYMD(new Date()),
+    categoria: document.getElementById('eg-categoria').value,
+    proveedor: document.getElementById('eg-proveedor').value.trim(),
+    metodoPago: document.getElementById('eg-metodo').value,
+  });
 }
 
 function viewDuenoMeseros(){
