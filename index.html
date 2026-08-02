@@ -21,7 +21,7 @@
   --info:#8AB4D9; --info-bg:#1E2E3A;
 }
 *{box-sizing:border-box;}
-html,body{height:100%;margin:0;}
+html,body{height:100%;margin:0;overflow-x:hidden;}
 body{background:var(--bg);color:var(--text);font-family:'Inter',ui-sans-serif,system-ui,sans-serif;-webkit-font-smoothing:antialiased;}
 button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit;}
 input,select,textarea{font-family:inherit;}
@@ -52,7 +52,7 @@ input,select,textarea{font-family:inherit;}
 
 #setupView{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:400;padding:20px;}
 
-#appView{height:100vh;display:none;flex-direction:column;}
+#appView{height:100vh;height:100dvh;display:none;flex-direction:column;}
 #appView.show{display:flex;}
 .screen{flex:1;overflow-y:auto;display:none;}
 .screen.active{display:flex;flex-direction:column;}
@@ -196,10 +196,13 @@ nav#bottomNav button .badge{position:absolute;top:2px;right:22%;background:#C23B
 .tag-no{background:var(--danger-bg);color:var(--danger);}
 .menu-card .actions{display:flex;gap:6px;margin-top:9px;}
 .menu-card .actions button{flex:1;background:var(--panel2);border:1px solid var(--border);color:var(--text2);border-radius:8px;padding:6px;font-size:10.5px;}
+/* Las tablas del panel del dueño pueden tener más columnas de las que caben
+   en un teléfono angosto — en vez de romper el layout de toda la página,
+   cada una scrollea horizontal dentro de su propio contenedor. */
+.table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;border:1px solid var(--border);border-radius:10px;}
 table.simple{width:100%;border-collapse:collapse;font-size:13px;}
-table.simple thead th{text-align:left;font-size:10.5px;color:var(--text3);text-transform:uppercase;padding:8px 10px;background:var(--panel);}
+table.simple thead th{text-align:left;font-size:10.5px;color:var(--text3);text-transform:uppercase;padding:8px 10px;background:var(--panel);white-space:nowrap;}
 table.simple tbody td{padding:8px 10px;border-top:1px solid var(--border);color:#EFE7D8;}
-table.simple{border:1px solid var(--border);border-radius:10px;overflow:hidden;}
 
 .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:flex-end;justify-content:center;z-index:100;}
 .modal-bg.open{display:flex;}
@@ -1920,9 +1923,9 @@ function viewDuenoDashboard(){
 
     <p style="font-weight:600;margin-bottom:10px">💸 Egresos por categoría</p>
     ${Object.keys(porCategoria).length===0 ? `<p style="color:var(--text5);font-size:13px;font-style:italic">Sin egresos registrados en este periodo.</p>` :
-      `<table class="simple"><thead><tr><th>Categoría</th><th>Total</th></tr></thead><tbody>
+      `<div class="table-scroll"><table class="simple"><thead><tr><th>Categoría</th><th>Total</th></tr></thead><tbody>
         ${Object.entries(porCategoria).sort((a,b)=>b[1]-a[1]).map(([cat,monto])=>`<tr><td>${esc(cat)}</td><td>${mxn(monto)}</td></tr>`).join('')}
-      </tbody></table>`}
+      </tbody></table></div>`}
   `;
 }
 
@@ -1933,12 +1936,12 @@ function viewDuenoEgresos(){
     <p style="color:var(--text3);font-size:12px;margin-bottom:16px">Gastos del restaurante — insumos, renta, nómina, servicios, etc.</p>
     <button class="btn btn-accent" style="margin-bottom:14px" onclick="duenoModalEgreso={};renderDueno()">+ Agregar gasto</button>
     ${ordenados.length===0?`<p style="color:var(--text5);font-size:13px;font-style:italic">Sin egresos registrados.</p>`:
-      `<table class="simple"><thead><tr><th>Fecha</th><th>Concepto</th><th>Categoría</th><th>Proveedor</th><th>Monto</th><th></th></tr></thead><tbody>
+      `<div class="table-scroll"><table class="simple"><thead><tr><th>Fecha</th><th>Concepto</th><th>Categoría</th><th>Proveedor</th><th>Monto</th><th></th></tr></thead><tbody>
         ${ordenados.map(e=>`<tr>
           <td>${esc(e.fecha)}</td><td>${esc(e.concepto)}</td><td>${esc(e.categoria)}</td><td>${esc(e.proveedor||'—')}</td><td>${mxn(e.monto)}</td>
           <td style="white-space:nowrap"><button class="btn btn-ghost btn-sm" onclick='duenoModalEgreso=${esc(JSON.stringify(e))};renderDueno()'>✎</button> <button class="btn btn-ghost btn-sm" onclick="eliminarEgresoDueno('${e.id}')">🗑</button></td>
         </tr>`).join('')}
-      </tbody></table>`}
+      </tbody></table></div>`}
   `;
 }
 function guardarEgresoDueno(datos){
@@ -2115,7 +2118,7 @@ function viewDuenoPedidos(){
   if(activos.length===0){
     html += `<p style="color:var(--text5);font-size:13px;font-style:italic">Sin pedidos todavía.</p>`;
   } else {
-    html += `<table class="simple"><thead><tr><th>Origen</th><th>Referencia</th><th>Platillos</th><th>Total</th><th>Estado</th><th>Hora</th><th></th></tr></thead><tbody>`;
+    html += `<div class="table-scroll"><table class="simple"><thead><tr><th>Origen</th><th>Referencia</th><th>Platillos</th><th>Total</th><th>Estado</th><th>Hora</th><th></th></tr></thead><tbody>`;
     html += activos.map(p=>{
       const puedeMarcarCobrado = p.origen!=='mesa' && p.estado!=='cobrado';
       return `<tr>
@@ -2128,13 +2131,13 @@ function viewDuenoPedidos(){
         <td>${puedeMarcarCobrado?`<button class="btn btn-ghost btn-sm" onclick="marcarPedidoCobradoDueno('${p.id}')">💰 Marcar cobrado</button>`:''}</td>
       </tr>`;
     }).join('');
-    html += `</tbody></table>`;
+    html += `</tbody></table></div>`;
   }
   if(programados.length){
     html += `<p style="font-weight:600;margin:18px 0 8px;color:var(--text3);font-size:13px">📅 Programados (ligados a una reservación, aún no van a cocina)</p>`;
-    html += `<table class="simple"><thead><tr><th>Referencia</th><th>Platillos</th><th>Se libera</th><th>Nota</th></tr></thead><tbody>`;
+    html += `<div class="table-scroll"><table class="simple"><thead><tr><th>Referencia</th><th>Platillos</th><th>Se libera</th><th>Nota</th></tr></thead><tbody>`;
     html += programados.map(p=>`<tr><td>${esc(p.referencia)}</td><td>${(p.items||[]).map(it=>`${it.cantidad}×${esc(it.platillo)}`).join(', ')}</td><td>${p.hora_liberacion?new Date(p.hora_liberacion).toLocaleString('es-MX'):'—'}</td><td>${esc(p.notas||'')}</td></tr>`).join('');
-    html += `</tbody></table>`;
+    html += `</tbody></table></div>`;
   }
   return html;
 }
@@ -2148,9 +2151,9 @@ function marcarPedidoCobradoDueno(id){
 function viewTablaSimple(titulo, columnas, filas, vacio){
   return `<p style="font-weight:600;margin-bottom:14px">${titulo}</p>
     ${filas.length===0?`<p style="color:var(--text5);font-size:13px;font-style:italic">${vacio}</p>`:
-    `<table class="simple"><thead><tr>${columnas.map(c=>`<th>${c}</th>`).join('')}</tr></thead>
+    `<div class="table-scroll"><table class="simple"><thead><tr>${columnas.map(c=>`<th>${c}</th>`).join('')}</tr></thead>
       <tbody>${filas.map(fila=>`<tr>${fila.map(celda=>`<td>${esc(celda)}</td>`).join('')}</tr>`).join('')}</tbody>
-    </table>`}`;
+    </table></div>`}`;
 }
 if('serviceWorker' in navigator){
   let ffSwRefrescando = false;
