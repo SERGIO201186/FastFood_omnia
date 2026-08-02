@@ -488,7 +488,9 @@ function normalizarMesero(m){
 function normalizarSolicitudTicket(s){
   let items = s.items;
   if(typeof items === 'string'){ try{ items = JSON.parse(items); }catch(e){ items = []; } }
-  return {...s, items: items||[], total: Number(s.total)||0, atendido: s.atendido===true||s.atendido==='true'||s.atendido==='TRUE'};
+  let pedidoIds = s.pedidoIds;
+  if(typeof pedidoIds === 'string'){ try{ pedidoIds = pedidoIds.trim() ? JSON.parse(pedidoIds) : []; }catch(e){ pedidoIds = []; } }
+  return {...s, items: items||[], total: Number(s.total)||0, atendido: s.atendido===true||s.atendido==='true'||s.atendido==='TRUE', pedidoIds: pedidoIds||[]};
 }
 function normalizarEgreso(e){ return {...e, monto: Number(e.monto)||0}; }
 
@@ -613,7 +615,7 @@ function arrancarConRol(){
   // a su propia pantalla en vez de al chat, que ni siquiera ven en su barra.
   const inicio = rol==='cocina' ? 'cocina' : rol==='mesero' ? 'mesero' : rol==='caja' ? 'caja' : 'chat';
   irAPantalla(inicio);
-  setInterval(()=>{ if(['cocina','mesero','caja'].includes(pantallaActual)) refrescarPedidosSilencioso(); }, 20000);
+  setInterval(()=>{ if(['cocina','mesero','caja'].includes(pantallaActual)) refrescarPedidosSilencioso(); }, 10000);
 }
 async function refrescarPedidosSilencioso(){
   const [pedidos, solicitudes] = await Promise.all([apiGet('pedidos'), apiGet('solicitudes_ticket')]);
@@ -667,7 +669,7 @@ const NAV_POR_ROL = {
 let pantallaActual = 'chat';
 function renderNav(){
   const activos = db.pedidos.filter(p=>['nuevo','preparacion','listo'].includes(p.estado)).length;
-  const ticketsPendientes = db.solicitudesTicket.filter(s=>!s.atendido).length;
+  const ticketsPendientes = db.solicitudesTicket.filter(s=>!s.atendido).length + db.pedidos.filter(p=>p.origen!=='mesa' && p.estado!=='programado' && p.estado!=='cobrado').length;
   const permitidas = NAV_POR_ROL[getRolDispositivo()] || NAV_POR_ROL.completo;
   document.getElementById('bottomNav').innerHTML = NAV.filter(n=>permitidas.includes(n.id)).map(n=>`
     <button class="${pantallaActual===n.id?'active':''}" onclick="irAPantalla('${n.id}')">
@@ -817,7 +819,7 @@ function ejecutarHerramienta(nombre, input){
     }
     case 'enviar_link_pago': {
       const id = uid('PED');
-      const pedido = { id, origen:'whatsapp', mesa:'', referencia: input.telefono||'Cliente chat', items: JSON.stringify(chatCarrito.map(it=>({cantidad:it.cantidad, platillo:it.platillo}))), total: input.total_cuenta, estado:'nuevo', pagado:'', hora: nowLabel(), fecha: new Date().toISOString(), hora_liberacion:'', notas:'' };
+      const pedido = { id, origen:'whatsapp', mesa:'', referencia: input.telefono||'Cliente chat', items: JSON.stringify(chatCarrito.map(it=>({cantidad:it.cantidad, platillo:it.platillo, precio:it.precioUnitario}))), total: input.total_cuenta, estado:'nuevo', pagado:'', hora: nowLabel(), fecha: new Date().toISOString(), hora_liberacion:'', notas:'' };
       db.pedidos.push(normalizarPedido(pedido)); syncFast('pedidos', pedido);
       chatCarrito = []; chatCarritoAbierto=false;
       return { success:true, enviado:true, id_pedido:id, link_simulado:'https://pagos.'+APP_NAME+'.example/checkout?demo=1' };
@@ -834,7 +836,7 @@ function ejecutarHerramienta(nombre, input){
         const f = new Date(input.fecha_reservacion+'T00:00:00'); f.setHours(h,m,0,0); f.setHours(f.getHours()-1);
         horaLiberacion = f.toISOString();
       }catch(e){}
-      const pedido = { id, origen:'whatsapp', mesa:'', referencia: input.telefono||'Cliente chat', items: JSON.stringify(chatCarrito.map(it=>({cantidad:it.cantidad, platillo:it.platillo}))), total: input.total_cuenta, estado:'programado', pagado:'', hora: nowLabel(), fecha: new Date().toISOString(), hora_liberacion: horaLiberacion, notas: `Para la reservación del ${input.fecha_reservacion} ${input.hora_reservacion}` };
+      const pedido = { id, origen:'whatsapp', mesa:'', referencia: input.telefono||'Cliente chat', items: JSON.stringify(chatCarrito.map(it=>({cantidad:it.cantidad, platillo:it.platillo, precio:it.precioUnitario}))), total: input.total_cuenta, estado:'programado', pagado:'', hora: nowLabel(), fecha: new Date().toISOString(), hora_liberacion: horaLiberacion, notas: `Para la reservación del ${input.fecha_reservacion} ${input.hora_reservacion}` };
       db.pedidos.push(normalizarPedido(pedido)); syncFast('pedidos', pedido);
       chatCarrito = []; chatCarritoAbierto=false;
       return { success:true, enviado:true, id_pedido:id, programado:true, link_simulado:'https://pagos.'+APP_NAME+'.example/checkout?demo=1', aviso:'Este pedido se preparará automáticamente 1 hora antes de tu reservación, no antes.' };
@@ -1142,9 +1144,9 @@ function cambiarQtyLocal(rid, delta, precio){
 }
 
 let meseroVista = 'mesas', meseroMesaActiva=null, meseroCategoriaActiva=null, meseroPlatilloActivo=null, meseroCantidadTmp=1;
-let cuentaModalMesa = null; // mesa para la que se está mostrando la cuenta combinada / eligiendo método de pago
+let cuentaModalMesa = null; // mesa para la que se está mostrando la cuenta combinada, antes de pedirla a caja
 let notasComandaTmp = {}; // { [mesa]: "texto de la nota mientras se arma la comanda" }
-let ticketParaImprimir = null; // pedido recién cobrado, mostrando pantalla de "imprimir ticket"
+let cajaCobroActivo = null; // {tipo:'mesa'|'pedido', id} — cuenta/pedido que caja está por confirmar como pagado, eligiendo método
 const METODOS_PAGO = [
   { id:'efectivo', label:'💵 Efectivo' },
   { id:'tarjeta', label:'💳 Tarjeta' },
@@ -1238,7 +1240,7 @@ function enviarACocina(){
   const comanda = comandasEnCurso[meseroMesaActiva]||[];
   if(comanda.length===0) return;
   const total = totalCarrito(comanda);
-  const itemsNuevos = comanda.map(it=>({cantidad:it.cantidad, platillo:it.platillo}));
+  const itemsNuevos = comanda.map(it=>({cantidad:it.cantidad, platillo:it.platillo, precio:it.precio}));
   // Antes esto se fusionaba con un pedido existente de la misma mesa — el
   // problema era que si ese pedido ya estaba "listo" o "en cocina", los
   // platillos nuevos se sumaban ahí sin que la cocina se enterara (el estado
@@ -1264,23 +1266,24 @@ function marcarEstadoPedido(id, estado){
 }
 function abrirCuentaMesa(mesa){ cuentaModalMesa = mesa; renderMesero(); }
 function cerrarCuentaMesa(){ cuentaModalMesa = null; renderMesero(); }
-function cobrarMesaConMetodo(mesa, metodo){
+function solicitudPendienteDeMesa(mesa){ return db.solicitudesTicket.find(s=>!s.atendido && String(s.mesa)===String(mesa)); }
+// El mesero YA NO marca la cuenta como pagada: solo avisa a caja. Caja es
+// quien de verdad recibe el dinero y confirma el cobro (ver
+// confirmarCobroCaja), tanto para mesas como para pedidos de domicilio/recoger.
+function pedirCuentaACaja(mesa){
+  if(solicitudPendienteDeMesa(mesa)){ cuentaModalMesa = null; renderMesero(); return; } // ya se pidió, evita duplicar
   const pedidos = db.pedidos.filter(p=>p.origen==='mesa' && String(p.mesa)===String(mesa) && p.estado!=='cobrado');
   if(!pedidos.length) return;
-  pedidos.forEach(p=>{
-    p.estado = 'cobrado';
-    p.metodoPago = metodo;
-    marcarCambioLocal(p.id);
-    syncFast('pedidos', {...p, items: JSON.stringify(p.items)});
-  });
-  cuentaModalMesa = null;
-  // El ticket combina los platillos de TODOS los pedidos de la mesa en uno solo.
-  ticketParaImprimir = {
-    id: pedidos.map(p=>p.id).join('+'), mesa, origen:'mesa', fecha: new Date().toISOString(), metodoPago: metodo,
+  const solicitud = {
+    id: uid('SOL'), mesa, metodoPago:'', fecha: new Date().toISOString(), atendido:false,
     items: pedidos.flatMap(p=>p.items),
     total: pedidos.reduce((a,p)=>a+p.total,0),
+    pedidoIds: pedidos.map(p=>p.id),
   };
-  renderPantallaActual();
+  db.solicitudesTicket.push(solicitud);
+  syncFast('solicitudes_ticket', {...solicitud, items: JSON.stringify(solicitud.items), pedidoIds: JSON.stringify(solicitud.pedidoIds), atendido:''});
+  cuentaModalMesa = null;
+  renderMesero();
 }
 
 function renderMesero(){
@@ -1350,7 +1353,7 @@ function renderMesero(){
             <span style="color:var(--accent);font-weight:600;font-size:14px">${mxn(totalMesa)}</span>
             <div style="display:flex;gap:6px">
               ${algunoListo?`<button class="btn btn-ghost btn-sm" onclick="${pedidosMesa.filter(p=>p.estado==='listo').map(p=>`marcarEstadoPedido('${p.id}','servido')`).join(';')}">✓ Marcar servido</button>`:''}
-              ${todosServidos?`<button class="btn btn-accent btn-sm" onclick="abrirCuentaMesa('${esc(mesa)}')">🧾 Pedir cuenta (junta ${pedidosMesa.length>1?'las '+pedidosMesa.length+' comandas':'todo'})</button>`:''}
+              ${todosServidos?(solicitudPendienteDeMesa(mesa)?`<button class="btn btn-ghost btn-sm" disabled>🕐 Esperando a caja...</button>`:`<button class="btn btn-accent btn-sm" onclick="abrirCuentaMesa('${esc(mesa)}')">🧾 Pedir cuenta (junta ${pedidosMesa.length>1?'las '+pedidosMesa.length+' comandas':'todo'})</button>`):''}
             </div>
           </div>
         </div>`;}).join('')}
@@ -1406,6 +1409,7 @@ function renderMesero(){
     if(!pedidosMesa.length){ cuentaModalMesa=null; document.getElementById('modalRoot').innerHTML=''; return; }
     const itemsTodos = pedidosMesa.flatMap(p=>p.items);
     const totalMesa = pedidosMesa.reduce((a,p)=>a+p.total,0);
+    const yaPedida = solicitudPendienteDeMesa(cuentaModalMesa);
     document.getElementById('modalRoot').innerHTML = `
       <div class="modal-bg open"><div class="modal">
         <h3>🧾 Cuenta — Mesa ${esc(cuentaModalMesa)}</h3>
@@ -1414,68 +1418,124 @@ function renderMesero(){
           ${itemsTodos.map(it=>`<div style="display:flex;justify-content:space-between;font-size:13px;padding:5px 0;border-bottom:1px solid var(--border)"><span>${it.cantidad} × ${esc(it.platillo)}</span></div>`).join('')}
         </div>
         <div style="display:flex;justify-content:space-between;margin-bottom:18px"><span style="color:var(--text2)">Total a cobrar</span><span style="font-size:19px;font-weight:700;color:var(--accent)">${mxn(totalMesa)}</span></div>
-        <p style="font-size:11.5px;color:var(--text3);margin-bottom:8px">¿Cómo pagó el cliente?</p>
-        <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:10px">
-          ${METODOS_PAGO.map(m=>`<button class="btn btn-accent" style="width:100%" onclick="cobrarMesaConMetodo('${esc(cuentaModalMesa)}','${m.id}')">${m.label}</button>`).join('')}
-        </div>
-        <button class="btn btn-ghost" style="width:100%" onclick="cerrarCuentaMesa()">Cancelar</button>
-      </div></div>`;
-  } else if(ticketParaImprimir){
-    const p = ticketParaImprimir;
-    const metodoLbl = (METODOS_PAGO.find(m=>m.id===p.metodoPago)||{}).label || p.metodoPago;
-    document.getElementById('modalRoot').innerHTML = `
-      <div class="modal-bg open"><div class="modal">
-        <h3>✅ Cobrado — Mesa ${esc(p.mesa)}</h3>
-        <p style="font-size:13px;color:var(--text2);margin-bottom:16px">Pagado con ${esc(metodoLbl)} · ${mxn(p.total)}</p>
-        <button class="btn btn-accent btn-lg" style="width:100%;margin-bottom:8px" onclick="solicitarTicketCaja(${esc(JSON.stringify(p))})">🧾 Solicitar ticket a caja</button>
-        <button class="btn btn-ghost" style="width:100%" onclick="ticketParaImprimir=null;renderMesero()">Cerrar sin pedir ticket</button>
+        ${yaPedida?`<p style="font-size:12.5px;color:var(--text3);margin-bottom:10px">🕐 Ya se le avisó a caja, está esperando a que confirmen el pago.</p>`:`
+        <p style="font-size:11.5px;color:var(--text3);margin-bottom:8px">Caja recibirá el pago del cliente y confirmará el cobro — aquí no se marca como pagado.</p>
+        <button class="btn btn-accent btn-lg" style="width:100%;margin-bottom:10px" onclick="pedirCuentaACaja('${esc(cuentaModalMesa)}')">🧾 Pedir cuenta a caja</button>`}
+        <button class="btn btn-ghost" style="width:100%" onclick="cerrarCuentaMesa()">Cerrar</button>
       </div></div>`;
   } else {
     document.getElementById('modalRoot').innerHTML='';
   }
 }
 
-// El mesero YA NO imprime desde su propio dispositivo — solo manda la
-// solicitud a la pantalla de Caja (una tablet/PC aparte, con la impresora
-// de verdad conectada). Evita que cualquiera con acceso a una tablet de
-// mesero pueda reimprimir tickets sin que caja se entere.
-function solicitarTicketCaja(pedido){
-  const solicitud = { id: uid('SOL'), mesa: pedido.mesa, metodoPago: pedido.metodoPago, total: pedido.total, items: pedido.items, fecha: pedido.fecha, atendido: false };
-  db.solicitudesTicket.push(solicitud);
-  syncFast('solicitudes_ticket', {...solicitud, items: JSON.stringify(solicitud.items), atendido: ''});
-  ticketParaImprimir = null;
-  renderMesero();
-}
-
 function renderCaja(){
-  const pendientes = db.solicitudesTicket.filter(s=>!s.atendido).sort((a,b)=>String(a.fecha||'').localeCompare(String(b.fecha||'')));
-  document.getElementById('cajaCount').textContent = pendientes.length+' pendiente(s)';
-  document.getElementById('cajaBody').innerHTML = pendientes.length===0
-    ? `<p style="color:var(--text5);font-size:13px;font-style:italic;text-align:center;margin-top:20px">Sin tickets pendientes de imprimir.</p>`
-    : pendientes.map(s=>{
-        const metodoLbl = (METODOS_PAGO.find(m=>m.id===s.metodoPago)||{}).label || s.metodoPago;
-        const hora = (()=>{ const d=new Date(s.fecha); return isNaN(d)?'':d.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'}); })();
-        return `<div class="order-card">
-          <div class="top">
-            <span class="order-tag" style="background:#C7703C30;color:#E8A33D">🪑 Mesa ${esc(s.mesa)}</span>
-            <span style="color:var(--text4);font-size:10px">🕐 ${esc(hora)}</span>
-          </div>
-          <ul>${s.items.map(it=>`<li>${it.cantidad}× ${esc(it.platillo)}</li>`).join('')}</ul>
-          <div class="bot">
-            <span class="total">${mxn(s.total)} · ${esc(metodoLbl)}</span>
-            <button class="btn btn-accent btn-sm" onclick="atenderSolicitudTicket('${s.id}')">🖨️ Imprimir</button>
-          </div>
-        </div>`;
-      }).join('');
+  const cuentasMesa = db.solicitudesTicket.filter(s=>!s.atendido).sort((a,b)=>String(a.fecha||'').localeCompare(String(b.fecha||'')));
+  const pedidosPorCobrar = db.pedidos.filter(p=>p.origen!=='mesa' && p.estado!=='programado' && p.estado!=='cobrado').sort((a,b)=>String(a.fecha||'').localeCompare(String(b.fecha||'')));
+  document.getElementById('cajaCount').textContent = (cuentasMesa.length+pedidosPorCobrar.length)+' pendiente(s)';
+  const tarjetaMesa = s=>{
+    const hora = (()=>{ const d=new Date(s.fecha); return isNaN(d)?'':d.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'}); })();
+    return `<div class="order-card">
+      <div class="top">
+        <span class="order-tag" style="background:#C7703C30;color:#E8A33D">🪑 Mesa ${esc(s.mesa)}</span>
+        <span style="color:var(--text4);font-size:10px">🕐 ${esc(hora)}</span>
+      </div>
+      <ul>${s.items.map(it=>`<li>${it.cantidad}× ${esc(it.platillo)}</li>`).join('')}</ul>
+      <div class="bot">
+        <span class="total">${mxn(s.total)}</span>
+        <button class="btn btn-accent btn-sm" onclick="abrirCobroCaja('mesa','${s.id}')">💰 Cobrar</button>
+      </div>
+    </div>`;
+  };
+  const tarjetaPedido = p=>{
+    const hora = (()=>{ const d=new Date(p.fecha); return isNaN(d)?'':d.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'}); })();
+    return `<div class="order-card">
+      <div class="top">
+        <span class="order-tag" style="background:#3C7FC730;color:#5CA8E8">💬 ${esc(p.referencia||'Pedido en línea')}</span>
+        <span style="color:var(--text4);font-size:10px">🕐 ${esc(hora)}</span>
+      </div>
+      <ul>${(p.items||[]).map(it=>`<li>${it.cantidad}× ${esc(it.platillo)}</li>`).join('')}</ul>
+      <div class="bot">
+        <span class="total">${mxn(p.total)}</span>
+        <button class="btn btn-accent btn-sm" onclick="abrirCobroCaja('pedido','${p.id}')">💰 Cobrar</button>
+      </div>
+    </div>`;
+  };
+  let html = '';
+  html += `<p style="color:var(--text3);font-size:11px;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px">🪑 Cuentas de mesa</p>`;
+  html += cuentasMesa.length===0 ? `<p style="color:var(--text5);font-size:12px;font-style:italic;margin-bottom:16px">Ninguna mesa esperando cobro.</p>` : cuentasMesa.map(tarjetaMesa).join('');
+  html += `<p style="color:var(--text3);font-size:11px;text-transform:uppercase;letter-spacing:.04em;margin:16px 0 8px">🛵 Domicilio y para recoger</p>`;
+  html += pedidosPorCobrar.length===0 ? `<p style="color:var(--text5);font-size:12px;font-style:italic">Sin pedidos pendientes de cobro.</p>` : pedidosPorCobrar.map(tarjetaPedido).join('');
+  document.getElementById('cajaBody').innerHTML = html;
+
+  if(cajaCobroActivo){
+    let titulo, total;
+    if(cajaCobroActivo.tipo==='mesa'){
+      const s = db.solicitudesTicket.find(x=>x.id===cajaCobroActivo.id);
+      if(!s){ cajaCobroActivo=null; document.getElementById('modalRoot').innerHTML=''; return; }
+      titulo = `Mesa ${s.mesa}`; total = s.total;
+    } else {
+      const p = db.pedidos.find(x=>x.id===cajaCobroActivo.id);
+      if(!p){ cajaCobroActivo=null; document.getElementById('modalRoot').innerHTML=''; return; }
+      titulo = p.referencia || 'Pedido en línea'; total = p.total;
+    }
+    document.getElementById('modalRoot').innerHTML = `
+      <div class="modal-bg open"><div class="modal">
+        <h3>💰 Cobrar — ${esc(titulo)}</h3>
+        <div style="display:flex;justify-content:space-between;margin-bottom:18px"><span style="color:var(--text2)">Total a cobrar</span><span style="font-size:19px;font-weight:700;color:var(--accent)">${mxn(total)}</span></div>
+        <p style="font-size:11.5px;color:var(--text3);margin-bottom:8px">¿Cómo pagó el cliente?</p>
+        <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:10px">
+          ${METODOS_PAGO.map(m=>`<button class="btn btn-accent" style="width:100%" onclick="confirmarCobroCaja('${m.id}')">${m.label}</button>`).join('')}
+        </div>
+        <button class="btn btn-ghost" style="width:100%" onclick="cerrarCobroCaja()">Cancelar</button>
+      </div></div>`;
+  } else {
+    document.getElementById('modalRoot').innerHTML = '';
+  }
 }
-function atenderSolicitudTicket(id){
-  const s = db.solicitudesTicket.find(x=>x.id===id); if(!s) return;
-  imprimirTicket({ id: s.id, mesa: s.mesa, origen:'mesa', fecha: s.fecha, metodoPago: s.metodoPago, items: s.items, total: s.total });
-  s.atendido = true;
-  syncFast('solicitudes_ticket', {...s, items: JSON.stringify(s.items), atendido:'true'});
+function abrirCobroCaja(tipo, id){ cajaCobroActivo = {tipo, id}; renderCaja(); }
+function cerrarCobroCaja(){ cajaCobroActivo = null; renderCaja(); }
+// Único lugar donde un pedido queda marcado como pagado: caja lo hace
+// después de recibir el dinero de verdad, nunca antes (ni el mesero al
+// pedir la cuenta, ni automáticamente al llegar un pedido de WhatsApp/chat).
+function confirmarCobroCaja(metodo){
+  if(!cajaCobroActivo) return;
+  const { tipo, id } = cajaCobroActivo;
+  if(tipo==='mesa'){
+    const s = db.solicitudesTicket.find(x=>x.id===id); if(!s) return;
+    // Si la columna pedidoIds todavía no existe en el Sheet (o esta solicitud
+    // es de antes de este cambio), cae de vuelta a identificar los pedidos
+    // por mesa, igual que antes.
+    const pedidos = (s.pedidoIds&&s.pedidoIds.length) ? db.pedidos.filter(p=>s.pedidoIds.includes(p.id)) : db.pedidos.filter(p=>p.origen==='mesa' && String(p.mesa)===String(s.mesa) && p.estado!=='cobrado');
+    pedidos.forEach(p=>{
+      p.estado = 'cobrado';
+      p.metodoPago = metodo;
+      marcarCambioLocal(p.id);
+      syncFast('pedidos', {...p, items: JSON.stringify(p.items)});
+    });
+    s.atendido = true;
+    s.metodoPago = metodo;
+    syncFast('solicitudes_ticket', {...s, items: JSON.stringify(s.items), pedidoIds: JSON.stringify(s.pedidoIds), atendido:'true'});
+    imprimirTicket({ id: s.id, mesa: s.mesa, origen:'mesa', fecha: new Date().toISOString(), metodoPago: metodo, items: s.items, total: s.total });
+  } else {
+    const p = db.pedidos.find(x=>x.id===id); if(!p) return;
+    p.estado = 'cobrado';
+    p.metodoPago = metodo;
+    marcarCambioLocal(p.id);
+    syncFast('pedidos', {...p, items: JSON.stringify(p.items)});
+    imprimirTicket({ ...p, fecha: new Date().toISOString(), metodoPago: metodo });
+  }
+  cajaCobroActivo = null;
   renderCaja();
 }
 
+// Folio corto y legible (fecha+hora) en vez del id interno del pedido, que
+// es un identificador técnico largo pensado para la base de datos, no para
+// que el cliente lo vea impreso.
+function folioTicket(pedido){
+  const f = new Date(pedido.fecha || Date.now());
+  const p2 = n => String(n).padStart(2,'0');
+  return `${String(f.getFullYear()).slice(2)}${p2(f.getMonth()+1)}${p2(f.getDate())}-${p2(f.getHours())}${p2(f.getMinutes())}${p2(f.getSeconds())}`;
+}
 // Imprime un ticket de pago usando el diálogo de impresión normal del
 // navegador — funciona con cualquier impresora que ya tengas instalada en
 // la tablet/PC (térmica de tickets o normal), sin conectar nada especial.
@@ -1490,12 +1550,12 @@ function imprimirTicket(pedido){
         <div style="font-size:11px">${esc(cfg.ubicacion||'')}</div>
       </div>
       <div style="border-top:1px dashed #000;border-bottom:1px dashed #000;padding:6px 0;margin-bottom:8px;font-size:11px">
-        <div>Folio: ${esc(pedido.id)}</div>
+        <div>Folio: ${esc(folioTicket(pedido))}</div>
         <div>${esc(pedido.origen==='mesa'?('Mesa '+pedido.mesa):'Pedido en línea')}</div>
         <div>${fecha.toLocaleDateString('es-MX')} ${fecha.toLocaleTimeString('es-MX')}</div>
       </div>
       <div style="font-size:12px;margin-bottom:8px">
-        ${pedido.items.map(it=>`<div style="display:flex;justify-content:space-between"><span>${it.cantidad}× ${esc(it.platillo)}</span></div>`).join('')}
+        ${pedido.items.map(it=>`<div style="display:flex;justify-content:space-between;gap:6px"><span>${it.cantidad}× ${esc(it.platillo)}</span>${it.precio!=null?`<span style="white-space:nowrap">${mxn(it.precio*it.cantidad)}</span>`:''}</div>`).join('')}
       </div>
       <div style="border-top:1px dashed #000;padding-top:6px;display:flex;justify-content:space-between;font-weight:700;font-size:14px">
         <span>TOTAL</span><span>${mxn(pedido.total)}</span>
