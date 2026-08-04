@@ -21,7 +21,7 @@
   --info:#8AB4D9; --info-bg:#1E2E3A;
 }
 *{box-sizing:border-box;}
-html,body{height:100%;margin:0;}
+html,body{height:100%;margin:0;overflow-x:hidden;}
 body{background:var(--bg);color:var(--text);font-family:'Inter',ui-sans-serif,system-ui,sans-serif;-webkit-font-smoothing:antialiased;}
 button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit;}
 input,select,textarea{font-family:inherit;}
@@ -52,7 +52,7 @@ input,select,textarea{font-family:inherit;}
 
 #setupView{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:400;padding:20px;}
 
-#appView{height:100vh;display:none;flex-direction:column;}
+#appView{height:100vh;height:100dvh;display:none;flex-direction:column;}
 #appView.show{display:flex;}
 .screen{flex:1;overflow-y:auto;display:none;}
 .screen.active{display:flex;flex-direction:column;}
@@ -196,10 +196,13 @@ nav#bottomNav button .badge{position:absolute;top:2px;right:22%;background:#C23B
 .tag-no{background:var(--danger-bg);color:var(--danger);}
 .menu-card .actions{display:flex;gap:6px;margin-top:9px;}
 .menu-card .actions button{flex:1;background:var(--panel2);border:1px solid var(--border);color:var(--text2);border-radius:8px;padding:6px;font-size:10.5px;}
+/* Las tablas del panel del dueño pueden tener más columnas de las que caben
+   en un teléfono angosto — en vez de romper el layout de toda la página,
+   cada una scrollea horizontal dentro de su propio contenedor. */
+.table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;border:1px solid var(--border);border-radius:10px;}
 table.simple{width:100%;border-collapse:collapse;font-size:13px;}
-table.simple thead th{text-align:left;font-size:10.5px;color:var(--text3);text-transform:uppercase;padding:8px 10px;background:var(--panel);}
+table.simple thead th{text-align:left;font-size:10.5px;color:var(--text3);text-transform:uppercase;padding:8px 10px;background:var(--panel);white-space:nowrap;}
 table.simple tbody td{padding:8px 10px;border-top:1px solid var(--border);color:#EFE7D8;}
-table.simple{border:1px solid var(--border);border-radius:10px;overflow:hidden;}
 
 .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:flex-end;justify-content:center;z-index:100;}
 .modal-bg.open{display:flex;}
@@ -264,6 +267,8 @@ table.simple{border:1px solid var(--border);border-radius:10px;overflow:hidden;}
     <button class="btn btn-ghost btn-sm" style="margin-top:12px" onclick="verificarAccesoOmnia()">↺ Reintentar</button>
   </div>
 </div>
+
+<div id="avisosGlobales" style="position:fixed;top:0;left:0;right:0;z-index:890;display:flex;flex-direction:column;"></div>
 
 <div id="appView">
   <div id="chatScreen" class="screen active">
@@ -442,13 +447,54 @@ async function apiPost(body){
     return await r.json();
   }catch(e){ console.error('apiPost',e); return {ok:false, error:String(e)}; }
 }
+// Cola de escrituras pendientes hacia el Sheet, guardada en localStorage
+// para que sobreviva a que se cierre la app o se apague el dispositivo.
+// Antes, syncFast/deleteFast mandaban el POST "al aire" (fire-and-forget):
+// si no había conexión, ese cambio se perdía para siempre y nunca se
+// reintentaba, aunque la app "seguía funcionando" localmente y daba a
+// entender que sí se había guardado. Ahora cada escritura que falla queda
+// en esta cola y se reintenta sola hasta que el Sheet la confirme.
+let colaSync = [];
+function loadColaSync(){ try{ const c = localStorage.getItem('ff_cola_sync'); if(c) colaSync = JSON.parse(c)||[]; }catch(e){ colaSync = []; } }
+function saveColaSync(){ try{ localStorage.setItem('ff_cola_sync', JSON.stringify(colaSync)); }catch(e){} }
+function tieneSyncPendiente(sheet, id){
+  return colaSync.some(op => op.sheet===sheet && (op.tipo==='delete' ? String(op.id)===String(id) : op.data && String(op.data.id)===String(id)));
+}
+function encolarSync(op){
+  colaSync.push(op);
+  saveColaSync();
+  actualizarBadgeSync();
+  procesarColaSync();
+}
+let procesandoColaSync = false;
+async function procesarColaSync(){
+  if(procesandoColaSync || !cfg.url || !colaSync.length) return;
+  procesandoColaSync = true;
+  try{
+    while(colaSync.length){
+      const op = colaSync[0];
+      const body = op.tipo==='delete' ? {action:'delete', sheet:op.sheet, id:op.id} : {action:'upsert', sheet:op.sheet, data:op.data};
+      const r = await apiPost(body);
+      if(!r || r.ok !== true){
+        logRemoto('warn','sync_pendiente_reintentara',{sheet:op.sheet, tipo:op.tipo, respuesta:r});
+        break; // sin conexión (o el servidor lo rechazó): se detiene sin perder el orden, se reintenta en el próximo intento
+      }
+      colaSync.shift();
+      saveColaSync();
+    }
+  } finally {
+    procesandoColaSync = false;
+    actualizarBadgeSync();
+  }
+}
+window.addEventListener('online', procesarColaSync);
 function syncFast(sheet, data){
   saveDbLocal();
-  if(cfg.url) apiPost({action:'upsert', sheet, data}).catch(()=>{});
+  if(cfg.url) encolarSync({tipo:'upsert', sheet, data});
 }
 function deleteFast(sheet, id){
   saveDbLocal();
-  if(cfg.url) apiPost({action:'delete', sheet, id}).catch(()=>{});
+  if(cfg.url) encolarSync({tipo:'delete', sheet, id});
 }
 async function cargarTodoDesdeSheet(){
   if(!cfg.url) return;
@@ -495,7 +541,7 @@ function normalizarSolicitudTicket(s){
 function normalizarEgreso(e){ return {...e, monto: Number(e.monto)||0}; }
 
 document.addEventListener('DOMContentLoaded', () => {
-  loadCfg(); loadDbLocal();
+  loadCfg(); loadDbLocal(); loadColaSync(); actualizarBadgeSync();
   // Esta pantalla nunca traía la clase "hidden" desde el HTML, así que se
   // veía apenas cargaba la página sin que ninguna condición la controlara.
   // La ocultamos aquí explícitamente y solo se muestra cuando de verdad hace falta.
@@ -588,6 +634,7 @@ async function verificarClaveGate(){
 async function arrancarAppReal(){
   const ok = await cargarTodoDesdeSheet();
   if(ok === false) mostrarAvisoConexion('No se pudo conectar con el Sheet del restaurante. Se están mostrando los últimos datos guardados en este dispositivo — puede que falten pedidos recientes de otros dispositivos.');
+  procesarColaSync(); // por si quedaron cambios sin mandar de una sesión offline anterior
   document.getElementById('chatNombreRest').textContent = cfg.nombre_restaurante || 'Mi Restaurante';
   if(!getRolDispositivo()){
     document.getElementById('rolView').classList.remove('hidden');
@@ -600,11 +647,27 @@ function mostrarAvisoConexion(texto){
   if(!el){
     el = document.createElement('div');
     el.id = 'avisoConexionGlobal';
-    el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:900;background:#B23A2E;color:#fff;font-size:12px;padding:8px 14px;text-align:center;';
-    document.body.appendChild(el);
+    el.style.cssText = 'background:#B23A2E;color:#fff;font-size:12px;padding:8px 14px;text-align:center;';
+    document.getElementById('avisosGlobales').appendChild(el);
   }
   el.textContent = '⚠️ ' + texto;
   el.onclick = () => { el.remove(); };
+}
+// Mientras haya operaciones (pedidos, cobros, cambios de menú, etc.) que
+// todavía no llegaron al Sheet porque el dispositivo estaba sin conexión,
+// se lo avisamos a quien esté usándolo — para que sepa que sigue trabajando
+// bien "sin internet" y que eso se va a sincronizar solo en cuanto regrese
+// la señal, en vez de asumir que su cambio ya quedó guardado en el Sheet.
+function actualizarBadgeSync(){
+  let el = document.getElementById('syncPendienteBanner');
+  if(colaSync.length===0){ if(el) el.remove(); return; }
+  if(!el){
+    el = document.createElement('div');
+    el.id = 'syncPendienteBanner';
+    el.style.cssText = 'background:#3A2E18;color:var(--accent);font-size:12px;padding:7px 14px;text-align:center;';
+    document.getElementById('avisosGlobales').appendChild(el);
+  }
+  el.textContent = `🔄 ${colaSync.length} cambio${colaSync.length===1?'':'s'} sin sincronizar — se guardan en este dispositivo y se mandan solos en cuanto regrese la conexión.`;
 }
 function arrancarConRol(){
   document.getElementById('appView').classList.add('show');
@@ -615,24 +678,48 @@ function arrancarConRol(){
   // a su propia pantalla en vez de al chat, que ni siquiera ven en su barra.
   const inicio = rol==='cocina' ? 'cocina' : rol==='mesero' ? 'mesero' : rol==='caja' ? 'caja' : 'chat';
   irAPantalla(inicio);
-  setInterval(()=>{ if(['cocina','mesero','caja'].includes(pantallaActual)) refrescarPedidosSilencioso(); }, 10000);
+  programarRefrescoPedidos();
+}
+const REFRESCO_PEDIDOS_MS = 10000;
+const REFRESCO_PEDIDOS_MAX_MS = 60000; // tope del backoff cuando el backend está fallando o sin cuota
+let refrescoPedidosFallosSeguidos = 0;
+// Antes esto era un setInterval fijo de 10s: si el backend empezaba a fallar
+// (Apps Script sin cuota, deployment caído, etc.) la app insistía cada 10s
+// sin parar, empeorando la saturación. Ahora, cada fallo alarga la siguiente
+// espera (10s, 20s, 40s... hasta 60s tope) y un refresco exitoso la regresa
+// a 10s de inmediato.
+function programarRefrescoPedidos(){
+  const espera = Math.min(REFRESCO_PEDIDOS_MS * Math.pow(2, refrescoPedidosFallosSeguidos), REFRESCO_PEDIDOS_MAX_MS);
+  setTimeout(async ()=>{
+    if(['cocina','mesero','caja'].includes(pantallaActual)) await refrescarPedidosSilencioso();
+    programarRefrescoPedidos();
+  }, espera);
+}
+// Fusiona lo que acaba de llegar del Sheet con lo que hay en este
+// dispositivo, sin perder cambios que siguen esperando en colaSync (por
+// ejemplo, un pedido creado sin conexión, que el Sheet todavía ni conoce).
+// Antes esto solo recorría la lista fresca del servidor (frescos.map(...)),
+// así que un pedido creado offline —que por definición no está en esa
+// lista— desaparecía de la pantalla en el siguiente refresco aunque
+// siguiera esperando su turno para sincronizarse.
+function fusionarConPendientes(sheet, frescos, localActual){
+  const idsFrescos = new Set(frescos.map(f=>f.id));
+  const ahora = Date.now();
+  const fusionados = frescos.map(fresco => {
+    const tocadoHaceRato = cambiosLocalesRecientes[fresco.id] && (ahora - cambiosLocalesRecientes[fresco.id] < VENTANA_PROTECCION_MS);
+    if (!tocadoHaceRato && !tieneSyncPendiente(sheet, fresco.id)) return fresco;
+    const local = localActual.find(p => p.id === fresco.id);
+    return local || fresco;
+  });
+  const nuevosSinSincronizar = localActual.filter(p => !idsFrescos.has(p.id) && tieneSyncPendiente(sheet, p.id));
+  return [...fusionados, ...nuevosSinSincronizar];
 }
 async function refrescarPedidosSilencioso(){
+  procesarColaSync(); // aprovecha cada ciclo para reintentar lo que siga sin sincronizar
   const [pedidos, solicitudes] = await Promise.all([apiGet('pedidos'), apiGet('solicitudes_ticket')]);
-  const ahora = Date.now();
-  if(Array.isArray(pedidos)){ // la llamada falló: no tocar lo que ya hay en pantalla
-    const frescos = pedidos.map(normalizarPedido);
-    // Por cada pedido que tú modificaste hace poco, conserva tu versión local
-    // en vez de la que acaba de llegar del Sheet (puede estar desactualizada
-    // si tu escritura todavía no aterrizaba cuando se disparó este refresco).
-    db.pedidos = frescos.map(fresco => {
-      const tocadoHaceRato = cambiosLocalesRecientes[fresco.id] && (ahora - cambiosLocalesRecientes[fresco.id] < VENTANA_PROTECCION_MS);
-      if (!tocadoHaceRato) return fresco;
-      const local = db.pedidos.find(p => p.id === fresco.id);
-      return local || fresco;
-    });
-  }
-  if(Array.isArray(solicitudes)) db.solicitudesTicket = solicitudes.map(normalizarSolicitudTicket);
+  refrescoPedidosFallosSeguidos = (pedidos===null && solicitudes===null) ? refrescoPedidosFallosSeguidos+1 : 0;
+  if(Array.isArray(pedidos)) db.pedidos = fusionarConPendientes('pedidos', pedidos.map(normalizarPedido), db.pedidos);
+  if(Array.isArray(solicitudes)) db.solicitudesTicket = fusionarConPendientes('solicitudes_ticket', solicitudes.map(normalizarSolicitudTicket), db.solicitudesTicket);
   saveDbLocal(); renderPantallaActual();
 }
 
@@ -1904,9 +1991,9 @@ function viewDuenoDashboard(){
 
     <p style="font-weight:600;margin-bottom:10px">💸 Egresos por categoría</p>
     ${Object.keys(porCategoria).length===0 ? `<p style="color:var(--text5);font-size:13px;font-style:italic">Sin egresos registrados en este periodo.</p>` :
-      `<table class="simple"><thead><tr><th>Categoría</th><th>Total</th></tr></thead><tbody>
+      `<div class="table-scroll"><table class="simple"><thead><tr><th>Categoría</th><th>Total</th></tr></thead><tbody>
         ${Object.entries(porCategoria).sort((a,b)=>b[1]-a[1]).map(([cat,monto])=>`<tr><td>${esc(cat)}</td><td>${mxn(monto)}</td></tr>`).join('')}
-      </tbody></table>`}
+      </tbody></table></div>`}
   `;
 }
 
@@ -1917,12 +2004,12 @@ function viewDuenoEgresos(){
     <p style="color:var(--text3);font-size:12px;margin-bottom:16px">Gastos del restaurante — insumos, renta, nómina, servicios, etc.</p>
     <button class="btn btn-accent" style="margin-bottom:14px" onclick="duenoModalEgreso={};renderDueno()">+ Agregar gasto</button>
     ${ordenados.length===0?`<p style="color:var(--text5);font-size:13px;font-style:italic">Sin egresos registrados.</p>`:
-      `<table class="simple"><thead><tr><th>Fecha</th><th>Concepto</th><th>Categoría</th><th>Proveedor</th><th>Monto</th><th></th></tr></thead><tbody>
+      `<div class="table-scroll"><table class="simple"><thead><tr><th>Fecha</th><th>Concepto</th><th>Categoría</th><th>Proveedor</th><th>Monto</th><th></th></tr></thead><tbody>
         ${ordenados.map(e=>`<tr>
           <td>${esc(e.fecha)}</td><td>${esc(e.concepto)}</td><td>${esc(e.categoria)}</td><td>${esc(e.proveedor||'—')}</td><td>${mxn(e.monto)}</td>
           <td style="white-space:nowrap"><button class="btn btn-ghost btn-sm" onclick='duenoModalEgreso=${esc(JSON.stringify(e))};renderDueno()'>✎</button> <button class="btn btn-ghost btn-sm" onclick="eliminarEgresoDueno('${e.id}')">🗑</button></td>
         </tr>`).join('')}
-      </tbody></table>`}
+      </tbody></table></div>`}
   `;
 }
 function guardarEgresoDueno(datos){
@@ -2099,7 +2186,7 @@ function viewDuenoPedidos(){
   if(activos.length===0){
     html += `<p style="color:var(--text5);font-size:13px;font-style:italic">Sin pedidos todavía.</p>`;
   } else {
-    html += `<table class="simple"><thead><tr><th>Origen</th><th>Referencia</th><th>Platillos</th><th>Total</th><th>Estado</th><th>Hora</th><th></th></tr></thead><tbody>`;
+    html += `<div class="table-scroll"><table class="simple"><thead><tr><th>Origen</th><th>Referencia</th><th>Platillos</th><th>Total</th><th>Estado</th><th>Hora</th><th></th></tr></thead><tbody>`;
     html += activos.map(p=>{
       const puedeMarcarCobrado = p.origen!=='mesa' && p.estado!=='cobrado';
       return `<tr>
@@ -2112,13 +2199,13 @@ function viewDuenoPedidos(){
         <td>${puedeMarcarCobrado?`<button class="btn btn-ghost btn-sm" onclick="marcarPedidoCobradoDueno('${p.id}')">💰 Marcar cobrado</button>`:''}</td>
       </tr>`;
     }).join('');
-    html += `</tbody></table>`;
+    html += `</tbody></table></div>`;
   }
   if(programados.length){
     html += `<p style="font-weight:600;margin:18px 0 8px;color:var(--text3);font-size:13px">📅 Programados (ligados a una reservación, aún no van a cocina)</p>`;
-    html += `<table class="simple"><thead><tr><th>Referencia</th><th>Platillos</th><th>Se libera</th><th>Nota</th></tr></thead><tbody>`;
+    html += `<div class="table-scroll"><table class="simple"><thead><tr><th>Referencia</th><th>Platillos</th><th>Se libera</th><th>Nota</th></tr></thead><tbody>`;
     html += programados.map(p=>`<tr><td>${esc(p.referencia)}</td><td>${(p.items||[]).map(it=>`${it.cantidad}×${esc(it.platillo)}`).join(', ')}</td><td>${p.hora_liberacion?new Date(p.hora_liberacion).toLocaleString('es-MX'):'—'}</td><td>${esc(p.notas||'')}</td></tr>`).join('');
-    html += `</tbody></table>`;
+    html += `</tbody></table></div>`;
   }
   return html;
 }
@@ -2132,9 +2219,9 @@ function marcarPedidoCobradoDueno(id){
 function viewTablaSimple(titulo, columnas, filas, vacio){
   return `<p style="font-weight:600;margin-bottom:14px">${titulo}</p>
     ${filas.length===0?`<p style="color:var(--text5);font-size:13px;font-style:italic">${vacio}</p>`:
-    `<table class="simple"><thead><tr>${columnas.map(c=>`<th>${c}</th>`).join('')}</tr></thead>
+    `<div class="table-scroll"><table class="simple"><thead><tr>${columnas.map(c=>`<th>${c}</th>`).join('')}</tr></thead>
       <tbody>${filas.map(fila=>`<tr>${fila.map(celda=>`<td>${esc(celda)}</td>`).join('')}</tr>`).join('')}</tbody>
-    </table>`}`;
+    </table></div>`}`;
 }
 if('serviceWorker' in navigator){
   let ffSwRefrescando = false;
