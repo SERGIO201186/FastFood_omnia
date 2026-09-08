@@ -1,8 +1,10 @@
 import {
   AbsoluteFill,
+  Audio,
   Easing,
   Interactive,
   interpolate,
+  staticFile,
   useCurrentFrame,
 } from "remotion";
 import { colors } from "../colors";
@@ -75,6 +77,7 @@ export const SceneRoles: React.FC = () => {
         alignItems: "center",
       }}
     >
+      <Audio src={staticFile("audio/scene-roles-es.mp3")} />
       <Interactive.Div
         name="Title"
         style={{

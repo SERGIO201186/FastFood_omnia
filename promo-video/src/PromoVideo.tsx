@@ -8,11 +8,11 @@ import { SceneRoles } from "./scenes/SceneRoles";
 import { SceneDashboard } from "./scenes/SceneDashboard";
 import { SceneOutro } from "./scenes/SceneOutro";
 
-export const INTRO_DURATION = 90;
+export const INTRO_DURATION = 130;
 export const CHAT_DURATION = 150;
-export const ROLES_DURATION = 120;
-export const DASHBOARD_DURATION = 90;
-export const OUTRO_DURATION = 90;
+export const ROLES_DURATION = 145;
+export const DASHBOARD_DURATION = 125;
+export const OUTRO_DURATION = 135;
 export const TRANSITION_DURATION = 15;
 
 export const PROMO_VIDEO_DURATION =

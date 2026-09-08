@@ -1,5 +1,6 @@
 import {
   AbsoluteFill,
+  Audio,
   Easing,
   Img,
   Interactive,
@@ -52,6 +53,7 @@ export const SceneIntro: React.FC = () => {
         alignItems: "center",
       }}
     >
+      <Audio src={staticFile("audio/scene-intro-es.mp3")} />
       <Interactive.Div
         name="Logo"
         style={{

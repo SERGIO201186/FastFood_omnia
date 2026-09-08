@@ -1,8 +1,10 @@
 import {
   AbsoluteFill,
+  Audio,
   Easing,
   Interactive,
   interpolate,
+  staticFile,
   useCurrentFrame,
 } from "remotion";
 import { colors } from "../colors";
@@ -77,6 +79,7 @@ export const SceneDashboard: React.FC = () => {
         gap: 50,
       }}
     >
+      <Audio src={staticFile("audio/scene-dashboard-es.mp3")} />
       <Interactive.Div
         name="Title"
         style={{
