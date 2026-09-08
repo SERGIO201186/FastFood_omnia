@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "text-to-speech": {
+      "source": "elevenlabs/skills",
+      "sourceType": "github",
+      "skillPath": "text-to-speech/SKILL.md",
+      "computedHash": "a07858869c331494278dc201fde7c002ab4155cf93b642cc0f712e8e86793be9"
+    }
+  }
+}
