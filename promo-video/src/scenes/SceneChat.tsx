@@ -1,8 +1,10 @@
 import {
   AbsoluteFill,
+  Audio,
   Easing,
   Interactive,
   interpolate,
+  staticFile,
   useCurrentFrame,
 } from "remotion";
 import { colors } from "../colors";
@@ -51,6 +53,7 @@ export const SceneChat: React.FC = () => {
         alignItems: "center",
       }}
     >
+      <Audio src={staticFile("audio/scene-chat-es.mp3")} />
       <Interactive.Div
         name="PhoneWrap"
         style={{ opacity: phoneOpacity, translate: `0 ${phoneY}px` }}
